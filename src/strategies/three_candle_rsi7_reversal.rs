@@ -4,68 +4,114 @@ use crate::binance::Candle;
 use crate::strategy::{Prediction, Signal, Strategy};
 
 const RSI_PERIOD: usize = 7;
-/// Historique suffisant pour RSI7 (8 deltas) + 3 bougies de detection
-const CANDLE_HISTORY: usize = RSI_PERIOD + 1 + 3;
+const STREAK: usize = 3;
 
+/// Couleur stricte d'une bougie : NEUTRE si doji (close == open).
+/// Identique à la fonction Python `candle_color`.
+fn strict_color(c: &Candle) -> &'static str {
+    if c.close > c.open {
+        "VERTE"
+    } else if c.close < c.open {
+        "ROUGE"
+    } else {
+        "NEUTRE"
+    }
+}
+
+fn rsi_from_avgs(avg_gain: f64, avg_loss: f64) -> f64 {
+    if avg_loss == 0.0 {
+        return 100.0;
+    }
+    let rs = avg_gain / avg_loss;
+    100.0 - 100.0 / (1.0 + rs)
+}
+
+/// RSI de Wilder (lissé EMA) — identique au script Python de référence.
+///
+/// Phase seed  : les RSI_PERIOD premiers deltas → moyenne simple (SMA).
+/// Phase live  : chaque delta suivant → lissage exponentiel de Wilder :
+///   avg_gain = (avg_gain * (period-1) + gain) / period
 pub struct ThreeCandleRsi7Reversal {
-    candles: Vec<Candle>,
+    /// Dernières STREAK bougies pour la détection de série.
+    recent: Vec<Candle>,
+    /// Dernier close vu (nécessaire pour calculer le delta).
+    last_close: Option<f64>,
+    /// Moyennes lissées Wilder (None avant la fin du seed).
+    avg_gain: Option<f64>,
+    avg_loss: Option<f64>,
+    /// Accumulation des gains/pertes pendant la phase seed.
+    seed_gains: Vec<f64>,
+    seed_losses: Vec<f64>,
+    /// RSI courant (None tant que le seed n'est pas terminé).
+    rsi: Option<f64>,
 }
 
 impl ThreeCandleRsi7Reversal {
     pub fn new() -> Self {
         Self {
-            candles: Vec::with_capacity(CANDLE_HISTORY + 1),
+            recent: Vec::with_capacity(STREAK + 1),
+            last_close: None,
+            avg_gain: None,
+            avg_loss: None,
+            seed_gains: Vec::with_capacity(RSI_PERIOD),
+            seed_losses: Vec::with_capacity(RSI_PERIOD),
+            rsi: None,
         }
     }
 
-    /// RSI simple (non lissé) sur les RSI_PERIOD derniers deltas.
-    pub fn compute_rsi(&self) -> Option<f64> {
-        if self.candles.len() < RSI_PERIOD + 1 {
-            return None;
-        }
-        let recent = &self.candles[self.candles.len() - RSI_PERIOD - 1..];
-        let mut gains = 0.0f64;
-        let mut losses = 0.0f64;
+    /// Alimente l'état interne (RSI + fenêtre de série) avec une nouvelle bougie.
+    fn feed_candle(&mut self, candle: &Candle) {
+        if let Some(last) = self.last_close {
+            let change = candle.close - last;
+            let gain = change.max(0.0);
+            let loss = (-change).max(0.0);
 
-        for i in 1..recent.len() {
-            let diff = recent[i].close - recent[i - 1].close;
-            if diff > 0.0 {
-                gains += diff;
+            if self.avg_gain.is_none() {
+                // Phase seed : on accumule jusqu'à RSI_PERIOD deltas
+                self.seed_gains.push(gain);
+                self.seed_losses.push(loss);
+                if self.seed_gains.len() == RSI_PERIOD {
+                    let ag = self.seed_gains.iter().sum::<f64>() / RSI_PERIOD as f64;
+                    let al = self.seed_losses.iter().sum::<f64>() / RSI_PERIOD as f64;
+                    self.avg_gain = Some(ag);
+                    self.avg_loss = Some(al);
+                    self.rsi = Some(rsi_from_avgs(ag, al));
+                }
             } else {
-                losses += diff.abs();
+                // Phase live : lissage exponentiel de Wilder
+                let ag = (self.avg_gain.unwrap() * (RSI_PERIOD - 1) as f64 + gain)
+                    / RSI_PERIOD as f64;
+                let al = (self.avg_loss.unwrap() * (RSI_PERIOD - 1) as f64 + loss)
+                    / RSI_PERIOD as f64;
+                self.avg_gain = Some(ag);
+                self.avg_loss = Some(al);
+                self.rsi = Some(rsi_from_avgs(ag, al));
             }
         }
+        self.last_close = Some(candle.close);
 
-        let avg_gain = gains / RSI_PERIOD as f64;
-        let avg_loss = losses / RSI_PERIOD as f64;
-
-        // P1 : marché complètement plat (avg_gain=0 ET avg_loss=0) → RSI neutre à 50
-        // (et non 100 qui signifierait une tendance haussière totale)
-        if avg_loss == 0.0 {
-            return if avg_gain == 0.0 {
-                Some(50.0)
-            } else {
-                Some(100.0)
-            };
+        self.recent.push(candle.clone());
+        if self.recent.len() > STREAK {
+            self.recent.remove(0);
         }
-        let rs = avg_gain / avg_loss;
-        Some(100.0 - 100.0 / (1.0 + rs))
     }
 
-    /// Retourne Some(true) si les 3 dernières bougies sont toutes vertes,
-    /// Some(false) si toutes rouges, None sinon.
+    /// RSI courant (None tant que RSI_PERIOD deltas n'ont pas été vus).
+    pub fn compute_rsi(&self) -> Option<f64> {
+        self.rsi
+    }
+
+    /// Some(true)  = 3 bougies VERTE consécutives (close > open)
+    /// Some(false) = 3 bougies ROUGE consécutives (close < open)
+    /// None        = série mixte ou doji présent
     pub fn last_three_same_color(&self) -> Option<bool> {
-        if self.candles.len() < 3 {
+        if self.recent.len() < STREAK {
             return None;
         }
-        let len = self.candles.len();
-        let c1 = &self.candles[len - 3];
-        let c2 = &self.candles[len - 2];
-        let c3 = &self.candles[len - 1];
-
-        if c1.is_green() && c2.is_green() && c3.is_green() {
+        let colors: Vec<&str> = self.recent.iter().map(strict_color).collect();
+        if colors.iter().all(|&c| c == "VERTE") {
             Some(true)
-        } else if c1.is_red() && c2.is_red() && c3.is_red() {
+        } else if colors.iter().all(|&c| c == "ROUGE") {
             Some(false)
         } else {
             None
@@ -79,35 +125,30 @@ impl Strategy for ThreeCandleRsi7Reversal {
     }
 
     fn warmup(&mut self, candle: &Candle) {
-        self.candles.push(candle.clone());
-        if self.candles.len() > CANDLE_HISTORY {
-            self.candles.remove(0);
-        }
+        self.feed_candle(candle);
     }
 
     fn on_closed_candle(&mut self, candle: &Candle) -> Option<Signal> {
-        self.candles.push(candle.clone());
-        if self.candles.len() > CANDLE_HISTORY {
-            self.candles.remove(0);
-        }
+        self.feed_candle(candle);
+        debug!(
+            "[STRATEGY] rsi={:?} série={:?}",
+            self.rsi,
+            self.last_three_same_color()
+        );
 
-        let rsi = self.compute_rsi();
-        let is_green_series = self.last_three_same_color();
-        debug!("[STRATEGY] candles={}", self.candles.len());
-
-        let rsi = rsi?;
-        let is_green_series = is_green_series?;
-        let last = self.candles.last()?;
+        let rsi = self.rsi?;
+        let is_green_series = self.last_three_same_color()?;
+        let last = self.recent.last()?;
 
         let prediction = if is_green_series {
-            // 3 bougies vertes + RSI suracheté => reversal DOWN
+            // 3 VERTE + RSI suracheté => reversal DOWN
             if rsi >= 65.0 {
                 Some(Prediction::Down)
             } else {
                 None
             }
         } else {
-            // 3 bougies rouges + RSI survendu => reversal UP
+            // 3 ROUGE + RSI survendu => reversal UP
             if rsi <= 35.0 {
                 Some(Prediction::Up)
             } else {
@@ -124,7 +165,7 @@ impl Strategy for ThreeCandleRsi7Reversal {
     }
 
     fn current_rsi(&self) -> Option<f64> {
-        self.compute_rsi()
+        self.rsi
     }
 
     fn current_series(&self) -> Option<bool> {

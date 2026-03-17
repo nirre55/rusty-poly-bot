@@ -92,17 +92,17 @@ fn test_rsi_all_gains_gives_100() {
     assert_eq!(s.compute_rsi().unwrap(), 100.0, "Toutes les hausses → RSI = 100");
 }
 
-/// P1 : marché complètement plat → RSI = 50 (neutre), pas 100
+/// Marché plat (tous doji) : avg_loss=0 → RSI=100, comportement identique Python.
 #[test]
-fn test_rsi_flat_market_gives_50() {
+fn test_rsi_flat_market_gives_100() {
     let mut s = ThreeCandleRsi7Reversal::new();
     for _ in 0..=7 {
         s.on_closed_candle(&make_candle(100.0, 100.0));
     }
     assert_eq!(
         s.compute_rsi().unwrap(),
-        50.0,
-        "Marché plat (avg_gain=0, avg_loss=0) doit donner RSI=50"
+        100.0,
+        "Marché plat (avg_gain=0, avg_loss=0) → avg_loss==0 → RSI=100 (comportement Wilder/Python)"
     );
 }
 
@@ -168,19 +168,19 @@ fn test_no_signal_rsi_neutral_with_green_series() {
     assert!(result.is_none(), "RSI≈42.86 : aucun signal attendu malgré 3 bougies vertes");
 }
 
-/// RSI=54.5 (neutre) + 3 bougies vertes → pas de signal
+/// RSI Wilder ~57 (neutre) + 3 bougies vertes → pas de signal (RSI < 65)
 #[test]
 fn test_no_signal_rsi_in_neutral_zone() {
     let mut s = ThreeCandleRsi7Reversal::new();
-    // Closes RSI (indices 3..10): 100,95,100,95,99,100,101,102
-    // Deltas: -5,+5,-5,+4,+1,+1,+1 → gains=12, pertes=10 → RSI≈54.5
+    // Closes: 100,100,100,100,95,100,95,99,100,101,102
+    // Wilder RSI après 11 bougies ≈ 57 (entre 35 et 65) → pas de signal
     let candles = [
         (100.0, 100.0), (100.0, 100.0), (100.0, 100.0), // fill
         (100.0, 100.0), (100.0, 95.0),  (95.0, 100.0),
         (100.0,  95.0), (95.0,   99.0), (99.0,  100.0),
         (100.0, 101.0), (101.0, 102.0),
     ];
-    assert!(feed(&mut s, &candles).is_none(), "RSI≈54.5 : aucun signal attendu");
+    assert!(feed(&mut s, &candles).is_none(), "RSI Wilder ~57 : aucun signal attendu");
 }
 
 #[test]
