@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     match binance::fetch_historical_candles(&config.symbol, &config.interval, 120).await {
         Ok(candles) => {
             for candle in candles {
-                active_strategy.on_closed_candle(&candle);
+                active_strategy.warmup(&candle);
             }
         }
         Err(e) => {
@@ -61,14 +61,20 @@ async fn main() -> Result<()> {
     while let Some(candle) = rx.recv().await {
         let signal_received_at = Utc::now();
 
+        let signal = active_strategy.on_closed_candle(&candle);
+
+        let color = if candle.is_green() { "VERT" } else { "ROUGE" };
         log_candle_close(
             &config.symbol,
             &config.interval,
             candle.close,
+            color,
+            active_strategy.current_rsi(),
+            active_strategy.current_series(),
             &candle.close_time,
         );
 
-        let Some(signal) = active_strategy.on_closed_candle(&candle) else {
+        let Some(signal) = signal else {
             continue;
         };
 

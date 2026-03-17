@@ -84,12 +84,32 @@ impl TradeLogger {
 
 // --- Fonctions de log console ---
 
-pub fn log_candle_close(symbol: &str, interval: &str, close: f64, close_time: &DateTime<Utc>) {
+pub fn log_candle_close(
+    symbol: &str,
+    interval: &str,
+    close: f64,
+    color: &str,
+    rsi: Option<f64>,
+    series: Option<bool>,
+    close_time: &DateTime<Utc>,
+) {
+    let rsi_str = match rsi {
+        Some(r) => format!("{:.2}", r),
+        None => "N/A".to_string(),
+    };
+    let series_str = match series {
+        Some(true) => "3xVERT",
+        Some(false) => "3xROUGE",
+        None => "mixte",
+    };
     info!(
-        "[BOUGIE FERMÉE] {} {} | close={:.2} | {}",
+        "[BOUGIE FERMÉE] {} {} | close={:.2} {} | RSI={} | série={} | {}",
         symbol,
         interval,
         close,
+        color,
+        rsi_str,
+        series_str,
         close_time.format("%Y-%m-%d %H:%M:%S UTC")
     );
 }

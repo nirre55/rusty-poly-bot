@@ -78,6 +78,13 @@ impl Strategy for ThreeCandleRsi7Reversal {
         "three_candle_rsi7_reversal"
     }
 
+    fn warmup(&mut self, candle: &Candle) {
+        self.candles.push(candle.clone());
+        if self.candles.len() > CANDLE_HISTORY {
+            self.candles.remove(0);
+        }
+    }
+
     fn on_closed_candle(&mut self, candle: &Candle) -> Option<Signal> {
         self.candles.push(candle.clone());
         if self.candles.len() > CANDLE_HISTORY {
@@ -86,17 +93,7 @@ impl Strategy for ThreeCandleRsi7Reversal {
 
         let rsi = self.compute_rsi();
         let is_green_series = self.last_three_same_color();
-
-        debug!(
-            "[STRATEGY] candles={} RSI={} | série={}",
-            self.candles.len(),
-            rsi.map(|r| format!("{:.2}", r)).unwrap_or("N/A".to_string()),
-            match is_green_series {
-                Some(true) => "3xVERT",
-                Some(false) => "3xROUGE",
-                None => "mixte",
-            }
-        );
+        debug!("[STRATEGY] candles={}", self.candles.len());
 
         let rsi = rsi?;
         let is_green_series = is_green_series?;
@@ -124,5 +121,13 @@ impl Strategy for ThreeCandleRsi7Reversal {
             rsi,
             strategy_name: self.name().to_string(),
         })
+    }
+
+    fn current_rsi(&self) -> Option<f64> {
+        self.compute_rsi()
+    }
+
+    fn current_series(&self) -> Option<bool> {
+        self.last_three_same_color()
     }
 }

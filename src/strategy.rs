@@ -30,4 +30,10 @@ pub struct Signal {
 pub trait Strategy: Send + Sync {
     fn name(&self) -> &str;
     fn on_closed_candle(&mut self, candle: &Candle) -> Option<Signal>;
+    /// Alimente l'historique sans logger ni retourner de signal (préchargement).
+    fn warmup(&mut self, candle: &Candle);
+    /// RSI courant (None si pas assez de bougies).
+    fn current_rsi(&self) -> Option<f64>;
+    /// Série des 3 dernières bougies : Some(true)=3xVERT, Some(false)=3xROUGE, None=mixte.
+    fn current_series(&self) -> Option<bool>;
 }
