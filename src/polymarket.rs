@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::config::{Config, ExecutionMode};
@@ -25,17 +26,18 @@ pub struct OrderResult {
 
 pub struct PolymarketClient {
     config: Config,
-    // Utilisé en V2 pour les appels HTTP réels
+    // P6 : client HTTP avec timeout configuré, prêt pour la V2
     #[allow(dead_code)]
     http: reqwest::Client,
 }
 
 impl PolymarketClient {
     pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            http: reqwest::Client::new(),
-        }
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { config, http }
     }
 
     /// Construit le slug Polymarket depuis le timestamp d'ouverture de la bougie cible.
@@ -83,7 +85,7 @@ impl PolymarketClient {
         match self.config.execution_mode {
             ExecutionMode::DryRun => {
                 info!(
-                    "[DRY-RUN] Ordre simulé | type={} token={} side=BUY amount={} USDC",
+                    "[DRY-RUN] Ordre simulé | type={} token={} amount={} USDC",
                     order_type, token_id, self.config.trade_amount_usdc
                 );
                 Ok(OrderResult {
@@ -93,23 +95,13 @@ impl PolymarketClient {
                     ack_at: Utc::now(),
                 })
             }
-            _ => {
-                // STUB V2 — implémentation réelle :
-                // 1. GET /markets?slug=... pour récupérer condition_id + tokenIds
-                // 2. Construire l'ordre signé EIP-712 avec la clé privée EVM
-                // 3. POST /order avec le payload signé
-                // Ref: https://docs.polymarket.com/#place-order
-                warn!(
-                    "[STUB] Ordre réel non implémenté (V2). \
-                     Nécessite signature EIP-712 et clé privée EVM configurée."
-                );
-                Ok(OrderResult {
-                    order_id: format!("stub-{}", uuid::Uuid::new_v4()),
-                    status: "STUB".to_string(),
-                    submitted_at,
-                    ack_at: Utc::now(),
-                })
-            }
+            // P3 : retourner Err au lieu de Ok(STUB) pour éviter un faux positif d'ordre placé
+            _ => Err(anyhow!(
+                "Mode {:?} non implémenté (V2). \
+                 Nécessite signature EIP-712 et clé privée EVM configurée. \
+                 Ref: https://docs.polymarket.com/#place-order",
+                self.config.execution_mode
+            )),
         }
     }
 }

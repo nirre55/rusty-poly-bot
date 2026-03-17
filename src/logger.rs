@@ -33,14 +33,20 @@ impl TradeLogger {
         fs::create_dir_all(logs_dir)?;
         let csv_path = PathBuf::from(logs_dir).join("trades.csv");
 
-        // Ecrire l'en-tête seulement si le fichier n'existe pas encore
-        if !csv_path.exists() {
+        // P7 : écrire les headers si le fichier n'existe pas OU s'il est vide
+        // (couvre le cas d'un crash pendant l'initialisation qui laisse un fichier vide)
+        let needs_header = !csv_path.exists()
+            || fs::metadata(&csv_path)
+                .map(|m| m.len() == 0)
+                .unwrap_or(true);
+
+        if needs_header {
             let file = OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(true)
                 .open(&csv_path)?;
             let mut wtr = WriterBuilder::new().has_headers(true).from_writer(file);
-            // Sérialiser un record vide pour forcer l'écriture des headers
             wtr.write_record(&[
                 "trade_id",
                 "symbol",

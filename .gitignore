@@ -4,3 +4,7 @@
 .DS_Store
 .idea/
 .vscode/
+_bmad/
+_bmad-output/
+*.csv
+.claude/

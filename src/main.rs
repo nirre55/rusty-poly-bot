@@ -1,24 +1,17 @@
-mod binance;
-mod config;
-mod logger;
-mod polymarket;
-mod strategies;
-mod strategy;
-
 use anyhow::Result;
 use chrono::Utc;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use binance::Candle;
-use config::Config;
-use logger::{
+use rusty_poly_bot::binance::{self, Candle};
+use rusty_poly_bot::config::Config;
+use rusty_poly_bot::logger::{
     log_candle_close, log_order_ack, log_order_sent, log_signal_detected, TradeLogger, TradeRecord,
 };
-use polymarket::PolymarketClient;
-use strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Reversal;
-use strategy::Strategy;
+use rusty_poly_bot::polymarket::PolymarketClient;
+use rusty_poly_bot::strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Reversal;
+use rusty_poly_bot::strategy::{Prediction, Strategy};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,6 +31,18 @@ async fn main() -> Result<()> {
     let trade_logger = TradeLogger::new(&config.logs_dir)?;
     let poly_client = PolymarketClient::new(config.clone());
     let mut active_strategy: Box<dyn Strategy> = Box::new(ThreeCandleRsi7Reversal::new());
+
+    // Précharger 120 bougies historiques pour amorcer le RSI dès le démarrage
+    match binance::fetch_historical_candles(&config.symbol, &config.interval, 120).await {
+        Ok(candles) => {
+            for candle in candles {
+                active_strategy.on_closed_candle(&candle);
+            }
+        }
+        Err(e) => {
+            error!("Impossible de précharger l'historique Binance: {}", e);
+        }
+    }
 
     let (tx, mut rx) = mpsc::channel::<Candle>(64);
 
@@ -73,7 +78,10 @@ async fn main() -> Result<()> {
             signal.rsi,
         );
 
-        let slug = PolymarketClient::build_slug(candle.open_time.timestamp_millis());
+        // P9 : slug sur le timestamp d'ouverture de la PROCHAINE bougie (close_time + 1ms)
+        let next_open_ms = (candle.close_time + chrono::Duration::milliseconds(1))
+            .timestamp_millis();
+        let slug = PolymarketClient::build_slug(next_open_ms);
 
         let market = match poly_client.resolve_market(&slug).await {
             Ok(m) => m,
@@ -93,18 +101,42 @@ async fn main() -> Result<()> {
             }
         };
 
-        // Mesures de latence
-        let signal_to_submit_start_ms =
-            (order_submit_started_at - signal_received_at).num_milliseconds();
-        let submit_start_to_ack_ms =
-            (order_result.ack_at - order_submit_started_at).num_milliseconds();
-        let signal_to_ack_ms = (order_result.ack_at - signal_received_at).num_milliseconds();
-        let trade_open_to_order_ack_ms =
-            (order_result.ack_at - candle.close_time).num_milliseconds();
+        // P8 : clamper les latences à 0 pour éviter des valeurs négatives (désync NTP)
+        let signal_to_submit_start_ms = {
+            let ms = (order_submit_started_at - signal_received_at).num_milliseconds();
+            if ms < 0 {
+                warn!("Latence signal→submit négative ({}ms) — désync NTP ?", ms);
+            }
+            ms.max(0)
+        };
+        let submit_start_to_ack_ms = {
+            let ms = (order_result.ack_at - order_submit_started_at).num_milliseconds();
+            if ms < 0 {
+                warn!("Latence submit→ack négative ({}ms) — désync NTP ?", ms);
+            }
+            ms.max(0)
+        };
+        let signal_to_ack_ms = {
+            let ms = (order_result.ack_at - signal_received_at).num_milliseconds();
+            if ms < 0 {
+                warn!("Latence signal→ack négative ({}ms) — désync NTP ?", ms);
+            }
+            ms.max(0)
+        };
+        let trade_open_to_order_ack_ms = {
+            let ms = (order_result.ack_at - candle.close_time).num_milliseconds();
+            if ms < 0 {
+                warn!(
+                    "Latence bougie→ack négative ({}ms) — désync horloge Binance/locale ?",
+                    ms
+                );
+            }
+            ms.max(0)
+        };
 
         let token_id = match &signal.prediction {
-            strategy::Prediction::Up => &market.up_token_id,
-            strategy::Prediction::Down => &market.down_token_id,
+            Prediction::Up => &market.up_token_id,
+            Prediction::Down => &market.down_token_id,
         };
 
         log_order_sent(&order_result.order_id, token_id, config.trade_amount_usdc);
@@ -118,7 +150,8 @@ async fn main() -> Result<()> {
             target_candle_open_time_utc: candle.close_time.to_rfc3339(),
             prediction: signal.prediction.to_string(),
             entry_side: "BUY".to_string(),
-            entry_order_type: format!("{:?}", config.execution_mode),
+            // P12 : as_str() pour cohérence avec order_status
+            entry_order_type: config.execution_mode.as_str().to_string(),
             order_status: order_result.status.clone(),
             signal_to_submit_start_ms,
             submit_start_to_ack_ms,
