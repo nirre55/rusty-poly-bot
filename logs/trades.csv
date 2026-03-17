@@ -1,0 +1,1 @@
+trade_id,symbol,interval,signal_close_time_utc,target_candle_open_time_utc,prediction,entry_side,entry_order_type,order_status,signal_to_submit_start_ms,submit_start_to_ack_ms,signal_to_ack_ms,trade_open_to_order_ack_ms,outcome

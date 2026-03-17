@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(/c/Users/Oulmi/.cargo/bin/cargo check:*)",
+      "Bash(/c/Users/Oulmi/.cargo/bin/cargo test:*)"
+    ],
+    "defaultMode": "bypassPermissions"
+  }
+}
