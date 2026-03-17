@@ -32,10 +32,21 @@ async fn main() -> Result<()> {
     let poly_client = PolymarketClient::new(config.clone());
     let mut active_strategy: Box<dyn Strategy> = Box::new(ThreeCandleRsi7Reversal::new());
 
-    // Précharger 120 bougies historiques pour amorcer le RSI dès le démarrage
+    // Précharger 120 bougies historiques pour amorcer le RSI dès le démarrage.
+    // On exclut la dernière bougie si elle est encore ouverte (close_time >= now),
+    // identique au filtre build_closed_candles() du script Python de référence.
     match binance::fetch_historical_candles(&config.symbol, &config.interval, 120).await {
         Ok(candles) => {
-            for candle in candles {
+            let now_ms = Utc::now().timestamp_millis();
+            let closed: Vec<_> = candles
+                .into_iter()
+                .filter(|c| c.close_time.timestamp_millis() < now_ms)
+                .collect();
+            info!(
+                "Préchargement : {} bougies fermées utilisées pour le warmup RSI",
+                closed.len()
+            );
+            for candle in closed {
                 active_strategy.warmup(&candle);
             }
         }
