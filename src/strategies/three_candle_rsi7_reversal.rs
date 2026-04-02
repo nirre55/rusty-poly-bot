@@ -5,6 +5,9 @@ use crate::strategy::{Prediction, Signal, Strategy};
 
 const RSI_PERIOD: usize = 7;
 const STREAK: usize = 3;
+const ATR_PERIOD: usize = 14;
+const ATR_MULTIPLIER: f64 = 1.0;
+const BODY_RATIO_MIN: f64 = 0.60;
 
 /// Couleur stricte d'une bougie : NEUTRE si doji (close == open).
 /// Identique à la fonction Python `candle_color`.
@@ -34,16 +37,20 @@ fn rsi_from_avgs(avg_gain: f64, avg_loss: f64) -> f64 {
 pub struct ThreeCandleRsi7Reversal {
     /// Dernières STREAK bougies pour la détection de série.
     recent: Vec<Candle>,
-    /// Dernier close vu (nécessaire pour calculer le delta).
+    /// Dernier close vu (nécessaire pour calculer le delta RSI et le True Range).
     last_close: Option<f64>,
     /// Moyennes lissées Wilder (None avant la fin du seed).
     avg_gain: Option<f64>,
     avg_loss: Option<f64>,
-    /// Accumulation des gains/pertes pendant la phase seed.
+    /// Accumulation des gains/pertes pendant la phase seed RSI.
     seed_gains: Vec<f64>,
     seed_losses: Vec<f64>,
-    /// RSI courant (None tant que le seed n'est pas terminé).
+    /// RSI courant (None tant que RSI_PERIOD deltas n'ont pas été vus).
     rsi: Option<f64>,
+    /// Fenêtre glissante des ATR_PERIOD derniers True Ranges.
+    true_ranges: Vec<f64>,
+    /// ATR14 courant (None tant que ATR_PERIOD True Ranges n'ont pas été accumulés).
+    atr: Option<f64>,
 }
 
 impl ThreeCandleRsi7Reversal {
@@ -56,18 +63,20 @@ impl ThreeCandleRsi7Reversal {
             seed_gains: Vec::with_capacity(RSI_PERIOD),
             seed_losses: Vec::with_capacity(RSI_PERIOD),
             rsi: None,
+            true_ranges: Vec::with_capacity(ATR_PERIOD),
+            atr: None,
         }
     }
 
-    /// Alimente l'état interne (RSI + fenêtre de série) avec une nouvelle bougie.
+    /// Alimente l'état interne (RSI + ATR + fenêtre de série) avec une nouvelle bougie.
     fn feed_candle(&mut self, candle: &Candle) {
         if let Some(last) = self.last_close {
+            // --- RSI ---
             let change = candle.close - last;
             let gain = change.max(0.0);
             let loss = (-change).max(0.0);
 
             if self.avg_gain.is_none() {
-                // Phase seed : on accumule jusqu'à RSI_PERIOD deltas
                 self.seed_gains.push(gain);
                 self.seed_losses.push(loss);
                 if self.seed_gains.len() == RSI_PERIOD {
@@ -78,7 +87,6 @@ impl ThreeCandleRsi7Reversal {
                     self.rsi = Some(rsi_from_avgs(ag, al));
                 }
             } else {
-                // Phase live : lissage exponentiel de Wilder
                 let ag = (self.avg_gain.unwrap() * (RSI_PERIOD - 1) as f64 + gain)
                     / RSI_PERIOD as f64;
                 let al = (self.avg_loss.unwrap() * (RSI_PERIOD - 1) as f64 + loss)
@@ -86,6 +94,18 @@ impl ThreeCandleRsi7Reversal {
                 self.avg_gain = Some(ag);
                 self.avg_loss = Some(al);
                 self.rsi = Some(rsi_from_avgs(ag, al));
+            }
+
+            // --- ATR14 (True Range = max des 3 mesures standard) ---
+            let tr = (candle.high - candle.low)
+                .max((candle.high - last).abs())
+                .max((candle.low - last).abs());
+            if self.true_ranges.len() == ATR_PERIOD {
+                self.true_ranges.remove(0);
+            }
+            self.true_ranges.push(tr);
+            if self.true_ranges.len() == ATR_PERIOD {
+                self.atr = Some(self.true_ranges.iter().sum::<f64>() / ATR_PERIOD as f64);
             }
         }
         self.last_close = Some(candle.close);
@@ -99,6 +119,31 @@ impl ThreeCandleRsi7Reversal {
     /// RSI courant (None tant que RSI_PERIOD deltas n'ont pas été vus).
     pub fn compute_rsi(&self) -> Option<f64> {
         self.rsi
+    }
+
+    /// ATR14 courant (None tant que ATR_PERIOD bougies n'ont pas été vues).
+    pub fn compute_atr(&self) -> Option<f64> {
+        self.atr
+    }
+
+    /// Vérifie que le range de la bougie (high-low) est ≥ ATR_MULTIPLIER × ATR14.
+    /// Retourne None si l'ATR n'est pas encore disponible.
+    fn range_ok(&self, candle: &Candle) -> Option<bool> {
+        let atr = self.atr?;
+        // Tolérance relative 1e-9 pour absorber les erreurs d'arrondi IEEE-754
+        // (ATR = moyenne de TR → légèrement différent du range direct à haute valeur)
+        Some((candle.high - candle.low) >= ATR_MULTIPLIER * atr - atr * 1e-9)
+    }
+
+    /// Vérifie que le body ratio de la bougie est ≥ BODY_RATIO_MIN.
+    /// body_ratio = |close - open| / (high - low)
+    /// Retourne None si le range est nul (bougie plate).
+    fn body_ratio_ok(candle: &Candle) -> Option<bool> {
+        let range = candle.high - candle.low;
+        if range == 0.0 {
+            return None;
+        }
+        Some((candle.close - candle.open).abs() / range >= BODY_RATIO_MIN)
     }
 
     /// Some(true)  = 3 bougies VERTE consécutives (close > open)
@@ -131,14 +176,23 @@ impl Strategy for ThreeCandleRsi7Reversal {
     fn on_closed_candle(&mut self, candle: &Candle) -> Option<Signal> {
         self.feed_candle(candle);
         debug!(
-            "[STRATEGY] rsi={:?} série={:?}",
+            "[STRATEGY] rsi={:?} atr={:?} série={:?}",
             self.rsi,
+            self.atr,
             self.last_three_same_color()
         );
 
         let rsi = self.rsi?;
         let is_green_series = self.last_three_same_color()?;
         let last = self.recent.last()?;
+
+        // Filtres Range et Body Ratio (silencieux si ATR pas encore prêt)
+        if !self.range_ok(last).unwrap_or(false) {
+            return None;
+        }
+        if !Self::body_ratio_ok(last).unwrap_or(false) {
+            return None;
+        }
 
         let prediction = if is_green_series {
             // 3 VERTE + RSI suracheté => reversal DOWN
@@ -170,5 +224,9 @@ impl Strategy for ThreeCandleRsi7Reversal {
 
     fn current_series(&self) -> Option<bool> {
         self.last_three_same_color()
+    }
+
+    fn current_atr(&self) -> Option<f64> {
+        self.atr
     }
 }

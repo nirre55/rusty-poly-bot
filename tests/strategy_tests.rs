@@ -4,12 +4,14 @@ use rusty_poly_bot::strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Rever
 use rusty_poly_bot::strategy::{Prediction, Strategy};
 
 fn make_candle(open: f64, close: f64) -> Candle {
+    // Mèche = 10% du body pour body_ratio ≈ 0.83 (> seuil 0.60)
+    let wick = (close - open).abs().max(0.01) * 0.1;
     Candle {
         open_time: Utc::now(),
         close_time: Utc::now(),
         open,
-        high: open.max(close) + 1.0,
-        low: open.min(close) - 1.0,
+        high: open.max(close) + wick,
+        low: open.min(close) - wick,
         close,
         volume: 1.0,
         is_closed: true,
@@ -186,9 +188,10 @@ fn test_no_signal_rsi_in_neutral_zone() {
 #[test]
 fn test_signal_down_on_three_green_high_rsi() {
     let mut s = ThreeCandleRsi7Reversal::new();
-    // 11 bougies toutes à la hausse → RSI=100 ≥ 65, 3 dernières vertes → DOWN
-    let candles: Vec<(f64, f64)> = (0..11)
-        .map(|i| (100.0 + i as f64 * 2.0, 100.0 + i as f64 * 2.0 + 1.5))
+    // 15 bougies continues à la hausse → RSI=100 ≥ 65, ATR prêt, 3 dernières vertes → DOWN
+    // open[i+1] = close[i] (pas de gap → TR = high-low)
+    let candles: Vec<(f64, f64)> = (0..15)
+        .map(|i| (100.0 + i as f64 * 2.0, 102.0 + i as f64 * 2.0))
         .collect();
     let sig = feed(&mut s, &candles).expect("Signal DOWN attendu");
     assert_eq!(sig.prediction, Prediction::Down);
@@ -198,9 +201,9 @@ fn test_signal_down_on_three_green_high_rsi() {
 #[test]
 fn test_signal_up_on_three_red_low_rsi() {
     let mut s = ThreeCandleRsi7Reversal::new();
-    // 11 bougies toutes à la baisse → RSI=0 ≤ 35, 3 dernières rouges → UP
-    let candles: Vec<(f64, f64)> = (0..11)
-        .map(|i| (300.0 - i as f64 * 2.0, 300.0 - i as f64 * 2.0 - 1.5))
+    // 15 bougies continues à la baisse → RSI=0 ≤ 35, ATR prêt, 3 dernières rouges → UP
+    let candles: Vec<(f64, f64)> = (0..15)
+        .map(|i| (300.0 - i as f64 * 2.0, 298.0 - i as f64 * 2.0))
         .collect();
     let sig = feed(&mut s, &candles).expect("Signal UP attendu");
     assert_eq!(sig.prediction, Prediction::Up);
@@ -210,8 +213,8 @@ fn test_signal_up_on_three_red_low_rsi() {
 #[test]
 fn test_signal_contains_strategy_name() {
     let mut s = ThreeCandleRsi7Reversal::new();
-    let candles: Vec<(f64, f64)> = (0..11)
-        .map(|i| (100.0 + i as f64 * 2.0, 100.0 + i as f64 * 2.0 + 1.5))
+    let candles: Vec<(f64, f64)> = (0..15)
+        .map(|i| (100.0 + i as f64 * 2.0, 102.0 + i as f64 * 2.0))
         .collect();
     let sig = feed(&mut s, &candles).unwrap();
     assert_eq!(sig.strategy_name, "three_candle_rsi7_reversal");
@@ -220,8 +223,8 @@ fn test_signal_contains_strategy_name() {
 #[test]
 fn test_signal_rsi_in_valid_range() {
     let mut s = ThreeCandleRsi7Reversal::new();
-    let candles: Vec<(f64, f64)> = (0..11)
-        .map(|i| (100.0 + i as f64 * 2.0, 100.0 + i as f64 * 2.0 + 1.5))
+    let candles: Vec<(f64, f64)> = (0..15)
+        .map(|i| (100.0 + i as f64 * 2.0, 102.0 + i as f64 * 2.0))
         .collect();
     let sig = feed(&mut s, &candles).unwrap();
     assert!(sig.rsi >= 0.0 && sig.rsi <= 100.0);
@@ -230,8 +233,8 @@ fn test_signal_rsi_in_valid_range() {
 #[test]
 fn test_signal_close_time_is_not_epoch() {
     let mut s = ThreeCandleRsi7Reversal::new();
-    let candles: Vec<(f64, f64)> = (0..11)
-        .map(|i| (100.0 + i as f64 * 2.0, 100.0 + i as f64 * 2.0 + 1.5))
+    let candles: Vec<(f64, f64)> = (0..15)
+        .map(|i| (100.0 + i as f64 * 2.0, 102.0 + i as f64 * 2.0))
         .collect();
     let sig = feed(&mut s, &candles).unwrap();
     assert!(sig.signal_candle_close_time.timestamp() > 0);

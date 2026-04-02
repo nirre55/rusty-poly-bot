@@ -36,4 +36,6 @@ pub trait Strategy: Send + Sync {
     fn current_rsi(&self) -> Option<f64>;
     /// Série des 3 dernières bougies : Some(true)=3xVERT, Some(false)=3xROUGE, None=mixte.
     fn current_series(&self) -> Option<bool>;
+    /// ATR14 courant (None si pas assez de bougies).
+    fn current_atr(&self) -> Option<f64>;
 }
