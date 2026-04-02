@@ -1,4 +1,13 @@
 use rusty_poly_bot::config::ExecutionMode;
+use std::sync::{Mutex, OnceLock};
+
+/// Mutex global pour sérialiser tous les tests qui touchent les variables d'environnement.
+/// Les tests config s'exécutent en parallèle par défaut, ce qui cause des race conditions
+/// sur les env vars partagées (EXECUTION_MODE, TRADE_AMOUNT_USDC…).
+static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
 
 #[test]
 fn test_execution_mode_as_str_dryrun() {
@@ -27,49 +36,63 @@ fn test_execution_mode_as_str_uppercase_consistent() {
 /// Vérifie que Config::from_env() fonctionne avec les valeurs par défaut (aucun .env requis)
 #[test]
 fn test_config_from_env_defaults() {
-    // Supprimer les vars pour tester les defaults
-    std::env::remove_var("EXECUTION_MODE");
-    std::env::remove_var("TRADE_AMOUNT_USDC");
-    std::env::remove_var("SYMBOL");
-    std::env::remove_var("INTERVAL");
+    let _guard = env_lock();
+    // Utiliser des valeurs non-parseables pour forcer le fallback sans supprimer les vars
+    // (dotenvy::dotenv() ne remplace PAS les vars déjà présentes dans l'environnement)
+    std::env::set_var("EXECUTION_MODE", "__default_test__");
+    std::env::set_var("TRADE_AMOUNT_USDC", "__default_test__");
+    std::env::set_var("SYMBOL", "btcusdt");
+    std::env::set_var("INTERVAL", "5m");
 
     let config = rusty_poly_bot::config::Config::from_env().unwrap();
     assert_eq!(config.symbol, "btcusdt");
     assert_eq!(config.interval, "5m");
-    assert_eq!(config.trade_amount_usdc, 10.0);
+    assert_eq!(config.trade_amount_usdc, 10.0); // "__default_test__" non parseable → default
     assert!(matches!(config.execution_mode, ExecutionMode::DryRun));
+    std::env::remove_var("EXECUTION_MODE");
+    std::env::remove_var("TRADE_AMOUNT_USDC");
 }
 
 /// Vérifie que TRADE_AMOUNT_USDC=0 est rejeté et remplacé par la valeur par défaut
 #[test]
 fn test_config_trade_amount_zero_uses_default() {
+    let _guard = env_lock();
+    std::env::set_var("EXECUTION_MODE", "__default_test__");
     std::env::set_var("TRADE_AMOUNT_USDC", "0");
     let config = rusty_poly_bot::config::Config::from_env().unwrap();
     assert_eq!(config.trade_amount_usdc, 10.0);
+    std::env::remove_var("EXECUTION_MODE");
     std::env::remove_var("TRADE_AMOUNT_USDC");
 }
 
 /// Vérifie que TRADE_AMOUNT_USDC négatif est rejeté
 #[test]
 fn test_config_trade_amount_negative_uses_default() {
+    let _guard = env_lock();
+    std::env::set_var("EXECUTION_MODE", "__default_test__");
     std::env::set_var("TRADE_AMOUNT_USDC", "-50");
     let config = rusty_poly_bot::config::Config::from_env().unwrap();
     assert_eq!(config.trade_amount_usdc, 10.0);
+    std::env::remove_var("EXECUTION_MODE");
     std::env::remove_var("TRADE_AMOUNT_USDC");
 }
 
 /// Vérifie que TRADE_AMOUNT_USDC non-parseable est rejeté
 #[test]
 fn test_config_trade_amount_invalid_string_uses_default() {
+    let _guard = env_lock();
+    std::env::set_var("EXECUTION_MODE", "__default_test__");
     std::env::set_var("TRADE_AMOUNT_USDC", "abc");
     let config = rusty_poly_bot::config::Config::from_env().unwrap();
     assert_eq!(config.trade_amount_usdc, 10.0);
+    std::env::remove_var("EXECUTION_MODE");
     std::env::remove_var("TRADE_AMOUNT_USDC");
 }
 
 /// Vérifie qu'un EXECUTION_MODE inconnu (faute de frappe) bascule sur DryRun
 #[test]
 fn test_config_unknown_execution_mode_defaults_to_dryrun() {
+    let _guard = env_lock();
     std::env::set_var("EXECUTION_MODE", "MARKET"); // majuscules incorrectes
     let config = rusty_poly_bot::config::Config::from_env().unwrap();
     assert!(matches!(config.execution_mode, ExecutionMode::DryRun));
@@ -79,6 +102,7 @@ fn test_config_unknown_execution_mode_defaults_to_dryrun() {
 /// Vérifie que Debug ne contient pas les secrets en clair
 #[test]
 fn test_config_debug_redacts_secrets() {
+    let _guard = env_lock();
     std::env::set_var("POLYMARKET_API_KEY", "super_secret_key");
     std::env::set_var("POLYMARKET_API_SECRET", "super_secret_value");
     let config = rusty_poly_bot::config::Config::from_env().unwrap();

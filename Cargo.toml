@@ -2,6 +2,7 @@
 name = "rusty-poly-bot"
 version = "0.1.0"
 edition = "2021"
+default-run = "rusty-poly-bot"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -17,3 +18,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
+alloy = { version = "1", features = ["signer-local", "signers"] }
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+backoff = { version = "0.4", features = ["tokio"] }
+polymarket-client-sdk = "0.3"

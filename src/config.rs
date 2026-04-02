@@ -34,6 +34,12 @@ pub struct Config {
     #[allow(dead_code)]
     pub polymarket_api_url: String,
     pub logs_dir: String,
+    /// Clé privée EVM (hex, avec ou sans "0x"). Requise pour ExecutionMode::Market.
+    pub evm_private_key: Option<String>,
+    /// Adresse funder Polymarket (proxy/safe) si différente de l'EOA signataire.
+    pub polymarket_funder: Option<String>,
+    /// Signature type Polymarket: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE.
+    pub polymarket_signature_type: Option<u8>,
 }
 
 impl std::fmt::Debug for Config {
@@ -48,6 +54,9 @@ impl std::fmt::Debug for Config {
             .field("polymarket_api_secret", &"[REDACTED]")
             .field("polymarket_api_url", &self.polymarket_api_url)
             .field("logs_dir", &self.logs_dir)
+            .field("evm_private_key", &"[REDACTED]")
+            .field("polymarket_funder", &self.polymarket_funder)
+            .field("polymarket_signature_type", &self.polymarket_signature_type)
             .finish()
     }
 }
@@ -91,6 +100,27 @@ impl Config {
             }
         };
 
+        let polymarket_signature_type = match env::var("POLYMARKET_SIGNATURE_TYPE") {
+            Ok(raw) => match raw.parse::<u8>() {
+                Ok(v @ 0..=2) => Some(v),
+                Ok(v) => {
+                    warn!(
+                        "POLYMARKET_SIGNATURE_TYPE={} invalide (attendu 0, 1 ou 2) — valeur ignorée",
+                        v
+                    );
+                    None
+                }
+                Err(_) => {
+                    warn!(
+                        "POLYMARKET_SIGNATURE_TYPE='{}' non parseable — valeur ignorée",
+                        raw
+                    );
+                    None
+                }
+            },
+            Err(_) => None,
+        };
+
         Ok(Config {
             binance_ws_url: env::var("BINANCE_WS_URL")
                 .unwrap_or_else(|_| "wss://stream.binance.com:9443/ws".to_string()),
@@ -103,6 +133,9 @@ impl Config {
             polymarket_api_url: env::var("POLYMARKET_API_URL")
                 .unwrap_or_else(|_| "https://clob.polymarket.com".to_string()),
             logs_dir: env::var("LOGS_DIR").unwrap_or_else(|_| "logs".to_string()),
+            evm_private_key: env::var("POLYMARKET_PRIVATE_KEY").ok(),
+            polymarket_funder: env::var("POLYMARKET_FUNDER").ok(),
+            polymarket_signature_type,
         })
     }
 }

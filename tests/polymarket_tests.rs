@@ -14,6 +14,9 @@ fn make_config(mode: ExecutionMode) -> Config {
         polymarket_api_secret: String::new(),
         polymarket_api_url: "https://clob.polymarket.com".to_string(),
         logs_dir: "logs".to_string(),
+        evm_private_key: None,
+        polymarket_funder: None,
+        polymarket_signature_type: None,
     }
 }
 
@@ -32,6 +35,7 @@ fn make_market() -> MarketInfo {
         up_token_id: "up_token".to_string(),
         down_token_id: "down_token".to_string(),
         slug: "btc-updown-5m-20240309".to_string(),
+        order_min_size: 5.0,
     }
 }
 
@@ -39,9 +43,9 @@ fn make_market() -> MarketInfo {
 
 #[test]
 fn test_build_slug_known_timestamp() {
-    // 2024-03-09 UTC
+    // 1710000000000 ms → Unix 1710000000 s
     let slug = PolymarketClient::build_slug(1710000000000);
-    assert_eq!(slug, "btc-updown-5m-20240309");
+    assert_eq!(slug, "btc-updown-5m-1710000000");
 }
 
 #[test]
@@ -51,26 +55,27 @@ fn test_build_slug_format_prefix() {
 }
 
 #[test]
-fn test_build_slug_date_format_8_digits() {
+fn test_build_slug_suffix_is_unix_seconds() {
+    // Le suffixe est le timestamp en secondes (pas YYYYMMDD)
     let slug = PolymarketClient::build_slug(1710000000000);
-    let date_part = slug.strip_prefix("btc-updown-5m-").unwrap();
-    assert_eq!(date_part.len(), 8, "La date doit être au format YYYYMMDD (8 chiffres)");
-    assert!(date_part.chars().all(|c| c.is_ascii_digit()));
+    let suffix = slug.strip_prefix("btc-updown-5m-").unwrap();
+    assert_eq!(suffix, "1710000000");
+    assert!(suffix.chars().all(|c| c.is_ascii_digit()));
 }
 
 #[test]
-fn test_build_slug_utc_midnight() {
-    // 2024-01-01 00:00:00 UTC = 1704067200000 ms
+fn test_build_slug_ms_to_seconds_truncation() {
+    // 1704067200000 ms → 1704067200 s
     let slug = PolymarketClient::build_slug(1704067200000);
-    assert_eq!(slug, "btc-updown-5m-20240101");
+    assert_eq!(slug, "btc-updown-5m-1704067200");
 }
 
 #[test]
-fn test_build_slug_different_days_produce_different_slugs() {
-    // Deux bougies sur des jours différents
-    let slug_day1 = PolymarketClient::build_slug(1710000000000); // 2024-03-09
-    let slug_day2 = PolymarketClient::build_slug(1710086400000); // 2024-03-10
-    assert_ne!(slug_day1, slug_day2);
+fn test_build_slug_different_candles_produce_different_slugs() {
+    // Deux bougies 5m consécutives (300 000 ms d'écart)
+    let slug1 = PolymarketClient::build_slug(1710000000000);
+    let slug2 = PolymarketClient::build_slug(1710000300000);
+    assert_ne!(slug1, slug2);
 }
 
 // --- place_order ---
