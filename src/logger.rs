@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use csv::WriterBuilder;
 use serde::Serialize;
@@ -9,6 +9,7 @@ use tracing::info;
 #[derive(Debug, Serialize)]
 pub struct TradeRecord {
     pub trade_id: String,
+    pub signal_key: String,
     pub symbol: String,
     pub interval: String,
     pub signal_close_time_utc: String,
@@ -49,6 +50,7 @@ impl TradeLogger {
             let mut wtr = WriterBuilder::new().has_headers(true).from_writer(file);
             wtr.write_record(&[
                 "trade_id",
+                "signal_key",
                 "symbol",
                 "interval",
                 "signal_close_time_utc",
@@ -69,6 +71,77 @@ impl TradeLogger {
         Ok(Self { csv_path })
     }
 
+    pub fn has_signal_key(&self, signal_key: &str) -> Result<bool> {
+        if !self.csv_path.exists() {
+            return Ok(false);
+        }
+
+        let content = fs::read_to_string(&self.csv_path)?;
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(content.as_bytes());
+
+        let headers = rdr.headers()?.clone();
+        let signal_key_col = headers
+            .iter()
+            .position(|h| h == "signal_key")
+            .ok_or_else(|| anyhow!("colonne 'signal_key' introuvable dans le CSV"))?;
+
+        for record in rdr.records() {
+            let record = record?;
+            if record.get(signal_key_col) == Some(signal_key) {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Met à jour le champ `outcome` d'un trade existant dans le CSV.
+    /// Lit le fichier entier, modifie la ligne correspondante, réécrit via un fichier temporaire.
+    pub fn update_outcome(&self, trade_id: &str, outcome: &str) -> Result<()> {
+        let content = fs::read_to_string(&self.csv_path)?;
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(content.as_bytes());
+
+        let headers = rdr.headers()?.clone();
+        let trade_id_col = headers.iter().position(|h| h == "trade_id").unwrap_or(0);
+        let outcome_col = headers
+            .iter()
+            .position(|h| h == "outcome")
+            .ok_or_else(|| anyhow!("colonne 'outcome' introuvable dans le CSV"))?;
+
+        let records: Vec<Vec<String>> = rdr
+            .records()
+            .map(|r| r.map(|rec| rec.iter().map(|f| f.to_string()).collect()))
+            .collect::<Result<_, _>>()?;
+
+        let tmp_path = self.csv_path.with_extension("tmp");
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
+        wtr.write_record(&headers)?;
+
+        for mut fields in records {
+            if fields.get(trade_id_col).map(|v| v.as_str()) == Some(trade_id) {
+                if let Some(f) = fields.get_mut(outcome_col) {
+                    *f = outcome.to_string();
+                }
+            }
+            wtr.write_record(&fields)?;
+        }
+        wtr.flush()?;
+        drop(wtr);
+
+        fs::rename(&tmp_path, &self.csv_path)?;
+        info!("Outcome mis à jour | trade_id={} outcome={}", trade_id, outcome);
+        Ok(())
+    }
+
     pub fn log_trade(&self, record: &TradeRecord) -> Result<()> {
         let file = OpenOptions::new().append(true).open(&self.csv_path)?;
         let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
@@ -87,10 +160,14 @@ impl TradeLogger {
 pub fn log_candle_close(
     symbol: &str,
     interval: &str,
+    candle_high: f64,
+    candle_low: f64,
+    candle_open: f64,
     close: f64,
     color: &str,
     rsi: Option<f64>,
     series: Option<bool>,
+    atr: Option<f64>,
     close_time: &DateTime<Utc>,
 ) {
     let rsi_str = match rsi {
@@ -102,14 +179,28 @@ pub fn log_candle_close(
         Some(false) => "3xROUGE",
         None => "mixte",
     };
+    let atr_str = match atr {
+        Some(a) => format!("{:.2}", a),
+        None => "N/A".to_string(),
+    };
+    let range = candle_high - candle_low;
+    let body_ratio_str = if range > 0.0 {
+        format!("{:.0}%", (close - candle_open).abs() / range * 100.0)
+    } else {
+        "N/A".to_string()
+    };
+    let range_str = format!("{:.2}", range);
     info!(
-        "[BOUGIE FERMÉE] {} {} | close={:.2} {} | RSI={} | série={} | {}",
+        "[BOUGIE FERMÉE] {} {} | close={:.2} {} | RSI={} | série={} | ATR={} | range={} | body={} | {}",
         symbol,
         interval,
         close,
         color,
         rsi_str,
         series_str,
+        atr_str,
+        range_str,
+        body_ratio_str,
         close_time.format("%Y-%m-%d %H:%M:%S UTC")
     );
 }

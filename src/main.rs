@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -12,6 +13,7 @@ use rusty_poly_bot::logger::{
 use rusty_poly_bot::polymarket::PolymarketClient;
 use rusty_poly_bot::strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Reversal;
 use rusty_poly_bot::strategy::{Prediction, Strategy};
+use rusty_poly_bot::tracker::{build_signal_key, PositionTracker};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,9 +30,21 @@ async fn main() -> Result<()> {
         config.execution_mode, config.symbol, config.interval
     );
 
-    let trade_logger = TradeLogger::new(&config.logs_dir)?;
-    let poly_client = PolymarketClient::new(config.clone());
+    let trade_logger = Arc::new(TradeLogger::new(&config.logs_dir)?);
+    let poly_client = Arc::new(PolymarketClient::new(config.clone()));
+    poly_client.warm_up().await;
     let mut active_strategy: Box<dyn Strategy> = Box::new(ThreeCandleRsi7Reversal::new());
+
+    // Tracker V3 : suit les ordres ouverts et met à jour outcome dans le CSV
+    let tracker = Arc::new(PositionTracker::new(
+        poly_client.clone(),
+        trade_logger.clone(),
+        &config.logs_dir,
+    ));
+    tokio::spawn({
+        let tracker = tracker.clone();
+        async move { tracker.run_poll_loop().await }
+    });
 
     // Précharger 120 bougies historiques pour amorcer le RSI dès le démarrage.
     // On exclut la dernière bougie si elle est encore ouverte (close_time >= now),
@@ -78,10 +92,14 @@ async fn main() -> Result<()> {
         log_candle_close(
             &config.symbol,
             &config.interval,
+            candle.high,
+            candle.low,
+            candle.open,
             candle.close,
             color,
             active_strategy.current_rsi(),
             active_strategy.current_series(),
+            active_strategy.current_atr(),
             &candle.close_time,
         );
 
@@ -99,6 +117,31 @@ async fn main() -> Result<()> {
         let next_open_ms = (candle.close_time + chrono::Duration::milliseconds(1))
             .timestamp_millis();
         let slug = PolymarketClient::build_slug(next_open_ms);
+        let signal_key = build_signal_key(&signal.strategy_name, &slug, &signal.prediction);
+
+        if tracker.is_signal_active(&signal_key).await {
+            warn!(
+                "Signal déjà en cours de suivi — ordre ignoré | signal_key={}",
+                signal_key
+            );
+            continue;
+        }
+        match trade_logger.has_signal_key(&signal_key) {
+            Ok(true) => {
+                warn!(
+                    "Signal déjà exécuté précédemment — ordre ignoré | signal_key={}",
+                    signal_key
+                );
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!(
+                    "Impossible de vérifier l'historique des signaux ({}), poursuite prudente",
+                    e
+                );
+            }
+        }
 
         let market = match poly_client.resolve_market(&slug).await {
             Ok(m) => m,
@@ -142,9 +185,9 @@ async fn main() -> Result<()> {
         };
         let trade_open_to_order_ack_ms = {
             let ms = (order_result.ack_at - candle.close_time).num_milliseconds();
-            if ms < 0 {
+            if ms < -2_000 {
                 warn!(
-                    "Latence bougie→ack négative ({}ms) — désync horloge Binance/locale ?",
+                    "Latence bougie→ack très négative ({}ms) — désync horloge Binance/locale ?",
                     ms
                 );
             }
@@ -159,15 +202,17 @@ async fn main() -> Result<()> {
         log_order_sent(&order_result.order_id, token_id, config.trade_amount_usdc);
         log_order_ack(&order_result.order_id, &order_result.status, signal_to_ack_ms);
 
+        let trade_id = Uuid::new_v4().to_string();
+
         let record = TradeRecord {
-            trade_id: Uuid::new_v4().to_string(),
+            trade_id: trade_id.clone(),
+            signal_key: signal_key.clone(),
             symbol: config.symbol.clone(),
             interval: config.interval.clone(),
             signal_close_time_utc: signal.signal_candle_close_time.to_rfc3339(),
             target_candle_open_time_utc: candle.close_time.to_rfc3339(),
             prediction: signal.prediction.to_string(),
             entry_side: "BUY".to_string(),
-            // P12 : as_str() pour cohérence avec order_status
             entry_order_type: config.execution_mode.as_str().to_string(),
             order_status: order_result.status.clone(),
             signal_to_submit_start_ms,
@@ -180,6 +225,11 @@ async fn main() -> Result<()> {
         if let Err(e) = trade_logger.log_trade(&record) {
             error!("Erreur lors de l'enregistrement du trade: {}", e);
         }
+
+        // V3 : enregistrer l'ordre pour suivi (no-op pour les ordres dry-run)
+        tracker
+            .track(trade_id, order_result.order_id, signal_key)
+            .await;
     }
 
     Ok(())

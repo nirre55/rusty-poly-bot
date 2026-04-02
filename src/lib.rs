@@ -4,3 +4,4 @@ pub mod logger;
 pub mod polymarket;
 pub mod strategies;
 pub mod strategy;
+pub mod tracker;

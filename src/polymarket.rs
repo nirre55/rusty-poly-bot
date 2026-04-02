@@ -32,6 +32,7 @@ const CLOB_API_BASE: &str = "https://clob.polymarket.com";
 const CTF_EXCHANGE_ADDR: &str = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
 const POLYGON_CHAIN_ID: u64 = 137;
 const CLOB_AUTH_MSG: &str = "This message attests that I control the given wallet";
+const FOK_RETRY_DELAYS_SECS: [u64; 3] = [3, 7, 10];
 
 // ── Types publics (API inchangée) ─────────────────────────────────────────────
 
@@ -329,76 +330,8 @@ impl PolymarketClient {
             }
 
             ExecutionMode::Market => {
-                let private_key = self
-                    .config
-                    .evm_private_key
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("POLYMARKET_PRIVATE_KEY requis pour le mode Market"))?;
-                let signer = PrivateKeySigner::from_str(private_key.trim_start_matches("0x"))
-                    .map_err(|e| anyhow!("POLYMARKET_PRIVATE_KEY invalide: {}", e))?
-                    .with_chain_id(Some(POLYGON));
-                let auth_builder = SdkClobClient::new(CLOB_API_BASE, SdkConfig::default())
-                    .map_err(|e| anyhow!("SDK client init: {}", e))?
-                    .authentication_builder(&signer);
-                let client = if let Some(funder) = self.config.polymarket_funder.as_deref() {
-                    let funder = Address::from_str(funder)
-                        .map_err(|e| anyhow!("POLYMARKET_FUNDER invalide: {}", e))?;
-                    let signature_type = match self.config.polymarket_signature_type.unwrap_or(2) {
-                        0 => SdkSignatureType::Eoa,
-                        1 => SdkSignatureType::Proxy,
-                        2 => SdkSignatureType::GnosisSafe,
-                        other => {
-                            return Err(anyhow!(
-                                "POLYMARKET_SIGNATURE_TYPE={} invalide (attendu 0, 1 ou 2)",
-                                other
-                            ));
-                        }
-                    };
-                    auth_builder
-                        .funder(funder)
-                        .signature_type(signature_type)
-                        .authenticate()
-                        .await
-                        .map_err(|e| anyhow!("SDK authenticate avec funder: {}", e))?
-                } else {
-                    auth_builder
-                        .authenticate()
-                        .await
-                        .map_err(|e| anyhow!("SDK authenticate: {}", e))?
-                };
-
-                let amount = Decimal::from_str(&format!("{:.6}", self.config.trade_amount_usdc))
-                    .map_err(|e| anyhow!("montant Decimal invalide: {}", e))?;
-                let order = client
-                    .market_order()
-                    .token_id(token_id_str)
-                    .amount(Amount::usdc(amount).map_err(|e| anyhow!("Amount::usdc: {}", e))?)
-                    .side(SdkSide::Buy)
-                    .order_type(SdkOrderType::FOK)
-                    .build()
+                self.submit_market_order_with_retry(token_id_str, submitted_at)
                     .await
-                    .map_err(|e| anyhow!("SDK build market_order: {}", e))?;
-                let signed_order = client
-                    .sign(&signer, order)
-                    .await
-                    .map_err(|e| anyhow!("SDK sign order: {}", e))?;
-                let resp = client
-                    .post_order(signed_order)
-                    .await
-                    .map_err(|e| anyhow!("SDK post_order: {}", e))?;
-                let ack_at = Utc::now();
-
-                info!(
-                    "Ordre FOK envoyé via SDK | token={} amount={}USDC",
-                    token_id_str, self.config.trade_amount_usdc
-                );
-
-                Ok(OrderResult {
-                    order_id: format!("{:?}", resp.order_id).trim_matches('"').to_string(),
-                    status: format!("{:?}", resp.status).trim_matches('"').to_string(),
-                    submitted_at,
-                    ack_at,
-                })
             }
 
             ExecutionMode::Limit => Err(anyhow!(
@@ -901,5 +834,115 @@ impl PolymarketClient {
         let result = mac.finalize().into_bytes();
 
         Ok(URL_SAFE.encode(result))
+    }
+
+    async fn submit_market_order(
+        &self,
+        token_id_str: &str,
+        submitted_at: DateTime<Utc>,
+    ) -> Result<OrderResult> {
+        let private_key = self
+            .config
+            .evm_private_key
+            .as_deref()
+            .ok_or_else(|| anyhow!("POLYMARKET_PRIVATE_KEY requis pour le mode Market"))?;
+        let signer = PrivateKeySigner::from_str(private_key.trim_start_matches("0x"))
+            .map_err(|e| anyhow!("POLYMARKET_PRIVATE_KEY invalide: {}", e))?
+            .with_chain_id(Some(POLYGON));
+        let auth_builder = SdkClobClient::new(CLOB_API_BASE, SdkConfig::default())
+            .map_err(|e| anyhow!("SDK client init: {}", e))?
+            .authentication_builder(&signer);
+        let client = if let Some(funder) = self.config.polymarket_funder.as_deref() {
+            let funder = Address::from_str(funder)
+                .map_err(|e| anyhow!("POLYMARKET_FUNDER invalide: {}", e))?;
+            let signature_type = match self.config.polymarket_signature_type.unwrap_or(2) {
+                0 => SdkSignatureType::Eoa,
+                1 => SdkSignatureType::Proxy,
+                2 => SdkSignatureType::GnosisSafe,
+                other => {
+                    return Err(anyhow!(
+                        "POLYMARKET_SIGNATURE_TYPE={} invalide (attendu 0, 1 ou 2)",
+                        other
+                    ));
+                }
+            };
+            auth_builder
+                .funder(funder)
+                .signature_type(signature_type)
+                .authenticate()
+                .await
+                .map_err(|e| anyhow!("SDK authenticate avec funder: {}", e))?
+        } else {
+            auth_builder
+                .authenticate()
+                .await
+                .map_err(|e| anyhow!("SDK authenticate: {}", e))?
+        };
+
+        let amount = Decimal::from_str(&format!("{:.6}", self.config.trade_amount_usdc))
+            .map_err(|e| anyhow!("montant Decimal invalide: {}", e))?;
+        let order = client
+            .market_order()
+            .token_id(token_id_str)
+            .amount(Amount::usdc(amount).map_err(|e| anyhow!("Amount::usdc: {}", e))?)
+            .side(SdkSide::Buy)
+            .order_type(SdkOrderType::FOK)
+            .build()
+            .await
+            .map_err(|e| anyhow!("SDK build market_order: {}", e))?;
+        let signed_order = client
+            .sign(&signer, order)
+            .await
+            .map_err(|e| anyhow!("SDK sign order: {}", e))?;
+        let resp = client
+            .post_order(signed_order)
+            .await
+            .map_err(|e| anyhow!("SDK post_order: {}", e))?;
+        let ack_at = Utc::now();
+
+        info!(
+            "Ordre FOK envoyé via SDK | token={} amount={}USDC",
+            token_id_str, self.config.trade_amount_usdc
+        );
+
+        Ok(OrderResult {
+            order_id: format!("{:?}", resp.order_id).trim_matches('"').to_string(),
+            status: format!("{:?}", resp.status).trim_matches('"').to_string(),
+            submitted_at,
+            ack_at,
+        })
+    }
+
+    async fn submit_market_order_with_retry(
+        &self,
+        token_id_str: &str,
+        submitted_at: DateTime<Utc>,
+    ) -> Result<OrderResult> {
+        let mut attempt = 0usize;
+
+        loop {
+            match self.submit_market_order(token_id_str, submitted_at).await {
+                Ok(result) => return Ok(result),
+                Err(e) if Self::is_fok_unfilled_error(&e) && attempt < FOK_RETRY_DELAYS_SECS.len() => {
+                    let delay_secs = FOK_RETRY_DELAYS_SECS[attempt];
+                    warn!(
+                        "Ordre FOK non rempli immédiatement pour token={} — retry {}/{} dans {}s",
+                        token_id_str,
+                        attempt + 1,
+                        FOK_RETRY_DELAYS_SECS.len(),
+                        delay_secs
+                    );
+                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    pub(crate) fn is_fok_unfilled_error(err: &anyhow::Error) -> bool {
+        let msg = err.to_string().to_ascii_lowercase();
+        msg.contains("fok orders are fully filled or killed")
+            || msg.contains("order couldn't be fully filled")
     }
 }

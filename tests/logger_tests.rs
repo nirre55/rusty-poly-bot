@@ -4,6 +4,7 @@ use std::fs;
 fn make_record(trade_id: &str, prediction: &str) -> TradeRecord {
     TradeRecord {
         trade_id: trade_id.to_string(),
+        signal_key: format!("sig-{}", trade_id),
         symbol: "BTCUSDT".to_string(),
         interval: "5m".to_string(),
         signal_close_time_utc: "2024-01-01T00:00:00+00:00".to_string(),
@@ -44,7 +45,7 @@ fn test_logger_csv_contains_headers() {
     let content = fs::read_to_string(dir.join("trades.csv")).unwrap();
 
     for header in &[
-        "trade_id", "symbol", "interval", "prediction",
+        "trade_id", "signal_key", "symbol", "interval", "prediction",
         "order_status", "outcome", "signal_to_ack_ms",
     ] {
         assert!(content.contains(header), "Header manquant: {}", header);
@@ -145,5 +146,18 @@ fn test_log_trade_latency_fields_written() {
     assert!(content.contains("17"));
     assert!(content.contains("59"));
     assert!(content.contains("310"));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_has_signal_key_finds_existing_signal() {
+    let dir = tmp_dir("signal_key");
+    let logger = TradeLogger::new(dir.to_str().unwrap()).unwrap();
+    let record = make_record("signal-key-id", "UP");
+
+    logger.log_trade(&record).unwrap();
+
+    assert!(logger.has_signal_key(&record.signal_key).unwrap());
+    assert!(!logger.has_signal_key("sig-missing").unwrap());
     fs::remove_dir_all(&dir).ok();
 }
