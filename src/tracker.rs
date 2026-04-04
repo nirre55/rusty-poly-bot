@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -25,6 +26,14 @@ struct PendingTrade {
     trade_id: String,
     order_id: String,
     signal_key: String,
+    #[serde(default)]
+    prediction: Option<Prediction>,
+    #[serde(default)]
+    target_close_time_ms: Option<i64>,
+    #[serde(default)]
+    order_status: Option<String>,
+    #[serde(default)]
+    validation_done: bool,
 }
 
 /// Suit les ordres ouverts et met à jour leur `outcome` dans le CSV dès qu'ils
@@ -58,7 +67,15 @@ impl PositionTracker {
     }
 
     /// Enregistre un ordre pour suivi. Les ordres dry-run sont ignorés.
-    pub async fn track(&self, trade_id: String, order_id: String, signal_key: String) {
+    pub async fn track(
+        &self,
+        trade_id: String,
+        order_id: String,
+        signal_key: String,
+        prediction: Prediction,
+        target_close_time: DateTime<Utc>,
+        order_status: String,
+    ) {
         if order_id.starts_with("dry-run-") {
             return;
         }
@@ -78,6 +95,10 @@ impl PositionTracker {
             trade_id,
             order_id,
             signal_key,
+            prediction: Some(prediction),
+            target_close_time_ms: Some(target_close_time.timestamp_millis()),
+            order_status: Some(order_status),
+            validation_done: false,
         });
         if let Err(e) = self.save_pending(&pending) {
             warn!("[TRACKER] Sauvegarde état tracker échouée: {}", e);
@@ -94,6 +115,50 @@ impl PositionTracker {
 
     pub async fn pending_count(&self) -> usize {
         self.pending.lock().await.len()
+    }
+
+    pub async fn validate_with_closed_candle(&self, candle_close_time: DateTime<Utc>, candle_is_green: bool) {
+        let mut pending = self.pending.lock().await;
+        let mut changed = false;
+
+        for trade in pending.iter_mut() {
+            if trade.validation_done {
+                continue;
+            }
+            if trade.target_close_time_ms != Some(candle_close_time.timestamp_millis()) {
+                continue;
+            }
+
+            let outcome = match (&trade.prediction, trade.order_status.as_deref()) {
+                (Some(prediction), Some(status)) if Self::is_filled_status(status) => {
+                    Some(Self::binance_outcome(prediction, candle_is_green))
+                }
+                (_, Some(status)) if Self::is_non_fill_terminal_status(status) => {
+                    Some("NO_ENTRY".to_string())
+                }
+                _ => None,
+            };
+
+            if let Some(outcome) = outcome {
+                if let Err(e) = self.logger.update_outcome(&trade.trade_id, &outcome) {
+                    warn!("[TRACKER] validation Binance échouée: {}", e);
+                } else {
+                    info!(
+                        "[TRACKER] Validation Binance | trade_id={} outcome={}",
+                        trade.trade_id, outcome
+                    );
+                    trade.validation_done = true;
+                    changed = true;
+                }
+            }
+        }
+
+        pending.retain(|trade| !Self::can_drop_trade(trade));
+        if changed {
+            if let Err(e) = self.save_pending(&pending) {
+                warn!("[TRACKER] Sauvegarde état tracker échouée: {}", e);
+            }
+        }
     }
 
     /// Boucle de polling en arrière-plan (toutes les 30 secondes).
@@ -117,7 +182,7 @@ impl PositionTracker {
         let mut pending = self.pending.lock().await;
         let mut still_pending = Vec::new();
 
-        for trade in pending.drain(..) {
+        for mut trade in pending.drain(..) {
             match self.client.get_order_status(&trade.order_id).await {
                 Ok(status) => {
                     info!(
@@ -129,12 +194,21 @@ impl PositionTracker {
                         "MATCHED" | "FILLED" | "CANCELLED" | "EXPIRED" | "UNMATCHED"
                     );
                     if is_terminal {
-                        if let Err(e) = self.logger.update_outcome(&trade.trade_id, &status) {
-                            warn!("[TRACKER] update_outcome failed: {}", e);
+                        if let Err(e) = self.logger.update_order_status(&trade.trade_id, &status) {
+                            warn!("[TRACKER] update_order_status failed: {}", e);
+                        } else {
+                            trade.order_status = Some(status.clone());
                         }
-                    } else {
-                        still_pending.push(trade);
+
+                        if Self::is_non_fill_terminal_status(&status) {
+                            if let Err(e) = self.logger.update_outcome(&trade.trade_id, "NO_ENTRY") {
+                                warn!("[TRACKER] update_outcome failed: {}", e);
+                            } else {
+                                trade.validation_done = true;
+                            }
+                        }
                     }
+                    still_pending.push(trade);
                 }
                 Err(e) => {
                     warn!("[TRACKER] get_order_status({}) failed: {}", trade.order_id, e);
@@ -143,6 +217,7 @@ impl PositionTracker {
             }
         }
 
+        still_pending.retain(|trade| !Self::can_drop_trade(trade));
         *pending = still_pending;
         if let Err(e) = self.save_pending(&pending) {
             warn!("[TRACKER] Sauvegarde état tracker échouée: {}", e);
@@ -171,5 +246,34 @@ impl PositionTracker {
         let body = serde_json::to_string_pretty(pending)?;
         fs::write(&self.state_path, body)?;
         Ok(())
+    }
+
+    fn is_filled_status(status: &str) -> bool {
+        matches!(status.to_ascii_uppercase().as_str(), "MATCHED" | "FILLED")
+    }
+
+    fn is_non_fill_terminal_status(status: &str) -> bool {
+        matches!(
+            status.to_ascii_uppercase().as_str(),
+            "CANCELLED" | "EXPIRED" | "UNMATCHED"
+        )
+    }
+
+    fn can_drop_trade(trade: &PendingTrade) -> bool {
+        trade.validation_done
+            && trade
+                .order_status
+                .as_deref()
+                .map(|status| {
+                    Self::is_filled_status(status) || Self::is_non_fill_terminal_status(status)
+                })
+                .unwrap_or(false)
+    }
+
+    fn binance_outcome(prediction: &Prediction, candle_is_green: bool) -> String {
+        match (prediction, candle_is_green) {
+            (Prediction::Up, true) | (Prediction::Down, false) => "WIN".to_string(),
+            _ => "LOSS".to_string(),
+        }
     }
 }

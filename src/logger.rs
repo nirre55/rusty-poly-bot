@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
+use csv::StringRecord;
 use csv::WriterBuilder;
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
@@ -68,6 +69,8 @@ impl TradeLogger {
             wtr.flush()?;
         }
 
+        Self::migrate_csv_if_needed(&csv_path)?;
+
         Ok(Self { csv_path })
     }
 
@@ -79,13 +82,13 @@ impl TradeLogger {
         let content = fs::read_to_string(&self.csv_path)?;
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(true)
+            .flexible(true)
             .from_reader(content.as_bytes());
 
         let headers = rdr.headers()?.clone();
-        let signal_key_col = headers
-            .iter()
-            .position(|h| h == "signal_key")
-            .ok_or_else(|| anyhow!("colonne 'signal_key' introuvable dans le CSV"))?;
+        let Some(signal_key_col) = headers.iter().position(|h| h == "signal_key") else {
+            return Ok(false);
+        };
 
         for record in rdr.records() {
             let record = record?;
@@ -100,21 +103,41 @@ impl TradeLogger {
     /// Met à jour le champ `outcome` d'un trade existant dans le CSV.
     /// Lit le fichier entier, modifie la ligne correspondante, réécrit via un fichier temporaire.
     pub fn update_outcome(&self, trade_id: &str, outcome: &str) -> Result<()> {
+        self.update_trade_field(trade_id, "outcome", outcome)
+    }
+
+    pub fn update_order_status(&self, trade_id: &str, order_status: &str) -> Result<()> {
+        self.update_trade_field(trade_id, "order_status", order_status)
+    }
+
+    fn update_trade_field(&self, trade_id: &str, column_name: &str, new_value: &str) -> Result<()> {
         let content = fs::read_to_string(&self.csv_path)?;
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(true)
+            .flexible(true)
             .from_reader(content.as_bytes());
 
         let headers = rdr.headers()?.clone();
         let trade_id_col = headers.iter().position(|h| h == "trade_id").unwrap_or(0);
-        let outcome_col = headers
+        let target_col = headers
             .iter()
-            .position(|h| h == "outcome")
-            .ok_or_else(|| anyhow!("colonne 'outcome' introuvable dans le CSV"))?;
+            .position(|h| h == column_name)
+            .ok_or_else(|| anyhow!("colonne '{}' introuvable dans le CSV", column_name))?;
 
         let records: Vec<Vec<String>> = rdr
             .records()
-            .map(|r| r.map(|rec| rec.iter().map(|f| f.to_string()).collect()))
+            .map(|r| {
+                r.map(|rec| {
+                    let mut fields: Vec<String> = rec.iter().map(|f| f.to_string()).collect();
+                    while fields.len() < headers.len() {
+                        fields.push(String::new());
+                    }
+                    if fields.len() > headers.len() {
+                        fields.truncate(headers.len());
+                    }
+                    fields
+                })
+            })
             .collect::<Result<_, _>>()?;
 
         let tmp_path = self.csv_path.with_extension("tmp");
@@ -128,8 +151,8 @@ impl TradeLogger {
 
         for mut fields in records {
             if fields.get(trade_id_col).map(|v| v.as_str()) == Some(trade_id) {
-                if let Some(f) = fields.get_mut(outcome_col) {
-                    *f = outcome.to_string();
+                if let Some(f) = fields.get_mut(target_col) {
+                    *f = new_value.to_string();
                 }
             }
             wtr.write_record(&fields)?;
@@ -138,8 +161,102 @@ impl TradeLogger {
         drop(wtr);
 
         fs::rename(&tmp_path, &self.csv_path)?;
-        info!("Outcome mis à jour | trade_id={} outcome={}", trade_id, outcome);
+        info!(
+            "Trade mis à jour | trade_id={} {}={}",
+            trade_id, column_name, new_value
+        );
         Ok(())
+    }
+
+    fn migrate_csv_if_needed(csv_path: &PathBuf) -> Result<()> {
+        if !csv_path.exists() {
+            return Ok(());
+        }
+
+        let content = fs::read_to_string(csv_path)?;
+        if content.trim().is_empty() {
+            return Ok(());
+        }
+
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .flexible(true)
+            .from_reader(content.as_bytes());
+        let headers = rdr.headers()?.clone();
+
+        if headers.iter().any(|h| h == "signal_key") {
+            return Ok(());
+        }
+
+        let old_header_len = headers.len();
+        let new_headers = Self::csv_headers();
+        let new_header_len = new_headers.len();
+
+        let mut migrated_rows = Vec::new();
+        for record in rdr.records() {
+            let record = record?;
+            let migrated = Self::migrate_record_to_current_schema(&record, old_header_len, new_header_len);
+            migrated_rows.push(migrated);
+        }
+
+        let tmp_path = csv_path.with_extension("tmp");
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
+        wtr.write_record(&new_headers)?;
+        for row in migrated_rows {
+            wtr.write_record(row)?;
+        }
+        wtr.flush()?;
+        drop(wtr);
+
+        fs::rename(&tmp_path, csv_path)?;
+        info!("Migration CSV effectuée | fichier={} -> schéma avec signal_key", csv_path.display());
+        Ok(())
+    }
+
+    fn migrate_record_to_current_schema(
+        record: &StringRecord,
+        old_header_len: usize,
+        new_header_len: usize,
+    ) -> Vec<String> {
+        let mut fields: Vec<String> = record.iter().map(|f| f.to_string()).collect();
+
+        if fields.len() == old_header_len {
+            fields.insert(1, String::new());
+        }
+
+        while fields.len() < new_header_len {
+            fields.push(String::new());
+        }
+        if fields.len() > new_header_len {
+            fields.truncate(new_header_len);
+        }
+
+        fields
+    }
+
+    fn csv_headers() -> [&'static str; 15] {
+        [
+            "trade_id",
+            "signal_key",
+            "symbol",
+            "interval",
+            "signal_close_time_utc",
+            "target_candle_open_time_utc",
+            "prediction",
+            "entry_side",
+            "entry_order_type",
+            "order_status",
+            "signal_to_submit_start_ms",
+            "submit_start_to_ack_ms",
+            "signal_to_ack_ms",
+            "trade_open_to_order_ack_ms",
+            "outcome",
+        ]
     }
 
     pub fn log_trade(&self, record: &TradeRecord) -> Result<()> {

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -15,6 +15,20 @@ use rusty_poly_bot::strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Rever
 use rusty_poly_bot::strategy::{Prediction, Strategy};
 use rusty_poly_bot::tracker::{build_signal_key, PositionTracker};
 
+fn parse_interval_duration(interval: &str) -> Result<Duration> {
+    if interval.len() < 2 {
+        anyhow::bail!("intervalle invalide: {}", interval);
+    }
+    let (value, unit) = interval.split_at(interval.len() - 1);
+    let value: i64 = value.parse()?;
+    match unit {
+        "m" => Ok(Duration::minutes(value)),
+        "h" => Ok(Duration::hours(value)),
+        "d" => Ok(Duration::days(value)),
+        _ => anyhow::bail!("unité d'intervalle non supportée: {}", interval),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -25,6 +39,7 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env()?;
+    let interval_duration = parse_interval_duration(&config.interval)?;
     info!(
         "Démarrage rusty-poly-bot | mode={:?} symbol={} interval={}",
         config.execution_mode, config.symbol, config.interval
@@ -103,6 +118,10 @@ async fn main() -> Result<()> {
             &candle.close_time,
         );
 
+        tracker
+            .validate_with_closed_candle(candle.close_time, candle.is_green())
+            .await;
+
         let Some(signal) = signal else {
             continue;
         };
@@ -117,6 +136,7 @@ async fn main() -> Result<()> {
         let next_open_ms = (candle.close_time + chrono::Duration::milliseconds(1))
             .timestamp_millis();
         let slug = PolymarketClient::build_slug(next_open_ms);
+        let target_close_time = candle.close_time + interval_duration;
         let signal_key = build_signal_key(&signal.strategy_name, &slug, &signal.prediction);
 
         if tracker.is_signal_active(&signal_key).await {
@@ -228,7 +248,14 @@ async fn main() -> Result<()> {
 
         // V3 : enregistrer l'ordre pour suivi (no-op pour les ordres dry-run)
         tracker
-            .track(trade_id, order_result.order_id, signal_key)
+            .track(
+                trade_id,
+                order_result.order_id,
+                signal_key,
+                signal.prediction.clone(),
+                target_close_time,
+                order_result.status.clone(),
+            )
             .await;
     }
 

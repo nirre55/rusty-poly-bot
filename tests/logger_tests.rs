@@ -161,3 +161,54 @@ fn test_has_signal_key_finds_existing_signal() {
     assert!(!logger.has_signal_key("sig-missing").unwrap());
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn test_logger_migrates_old_csv_schema() {
+    let dir = tmp_dir("migrate_old_schema");
+    fs::create_dir_all(&dir).unwrap();
+    let csv_path = dir.join("trades.csv");
+    fs::write(
+        &csv_path,
+        "trade_id,symbol,interval,signal_close_time_utc,target_candle_open_time_utc,prediction,entry_side,entry_order_type,order_status,signal_to_submit_start_ms,submit_start_to_ack_ms,signal_to_ack_ms,trade_open_to_order_ack_ms,outcome\n\
+old-id,BTCUSDT,5m,2024-01-01T00:00:00+00:00,2024-01-01T00:05:00+00:00,UP,BUY,MARKET,Matched,10,11,21,30,MATCHED\n",
+    )
+    .unwrap();
+
+    let _logger = TradeLogger::new(dir.to_str().unwrap()).unwrap();
+    let content = fs::read_to_string(&csv_path).unwrap();
+    let mut lines = content.lines();
+    let header = lines.next().unwrap();
+    let row = lines.next().unwrap();
+
+    assert!(header.contains("signal_key"));
+    assert_eq!(header.split(',').count(), 15);
+    assert_eq!(row.split(',').count(), 15);
+    assert!(row.starts_with("old-id,"));
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_logger_migrates_mixed_old_and_new_rows() {
+    let dir = tmp_dir("migrate_mixed_schema");
+    fs::create_dir_all(&dir).unwrap();
+    let csv_path = dir.join("trades.csv");
+    fs::write(
+        &csv_path,
+        "trade_id,symbol,interval,signal_close_time_utc,target_candle_open_time_utc,prediction,entry_side,entry_order_type,order_status,signal_to_submit_start_ms,submit_start_to_ack_ms,signal_to_ack_ms,trade_open_to_order_ack_ms,outcome\n\
+old-id,BTCUSDT,5m,2024-01-01T00:00:00+00:00,2024-01-01T00:05:00+00:00,UP,BUY,MARKET,Matched,10,11,21,30,MATCHED\n\
+new-id,sig-new,BTCUSDT,5m,2024-01-01T00:10:00+00:00,2024-01-01T00:15:00+00:00,DOWN,BUY,MARKET,Matched,12,13,25,40,PENDING\n",
+    )
+    .unwrap();
+
+    let logger = TradeLogger::new(dir.to_str().unwrap()).unwrap();
+    assert!(logger.has_signal_key("sig-new").unwrap());
+    logger.update_outcome("new-id", "MATCHED").unwrap();
+
+    let content = fs::read_to_string(&csv_path).unwrap();
+    let lines: Vec<_> = content.lines().collect();
+    assert_eq!(lines[0].split(',').count(), 15);
+    assert_eq!(lines[1].split(',').count(), 15);
+    assert_eq!(lines[2].split(',').count(), 15);
+    assert!(lines[2].ends_with("MATCHED"));
+    fs::remove_dir_all(&dir).ok();
+}
