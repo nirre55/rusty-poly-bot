@@ -185,19 +185,30 @@ impl PositionTracker {
         for mut trade in pending.drain(..) {
             match self.client.get_order_status(&trade.order_id).await {
                 Ok(status) => {
-                    info!(
-                        "[TRACKER] trade_id={} order_id={} status={}",
-                        trade.trade_id, trade.order_id, status
-                    );
+                    let status_changed = trade
+                        .order_status
+                        .as_deref()
+                        .map(|prev| !prev.eq_ignore_ascii_case(&status))
+                        .unwrap_or(true);
+
+                    if status_changed {
+                        info!(
+                            "[TRACKER] trade_id={} order_id={} status={}",
+                            trade.trade_id, trade.order_id, status
+                        );
+                    }
                     let is_terminal = matches!(
                         status.as_str(),
                         "MATCHED" | "FILLED" | "CANCELLED" | "EXPIRED" | "UNMATCHED"
                     );
                     if is_terminal {
-                        if let Err(e) = self.logger.update_order_status(&trade.trade_id, &status) {
-                            warn!("[TRACKER] update_order_status failed: {}", e);
-                        } else {
-                            trade.order_status = Some(status.clone());
+                        if status_changed {
+                            if let Err(e) = self.logger.update_order_status(&trade.trade_id, &status)
+                            {
+                                warn!("[TRACKER] update_order_status failed: {}", e);
+                            } else {
+                                trade.order_status = Some(status.clone());
+                            }
                         }
 
                         if Self::is_non_fill_terminal_status(&status) {
