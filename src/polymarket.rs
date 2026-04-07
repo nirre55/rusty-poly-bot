@@ -5,6 +5,8 @@ use backoff::{future::retry, ExponentialBackoffBuilder};
 use base64::{engine::general_purpose::URL_SAFE, Engine};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use polymarket_client_sdk::auth::state::Authenticated;
+use polymarket_client_sdk::auth::Normal;
 use polymarket_client_sdk::clob::{Client as SdkClobClient, Config as SdkConfig};
 use polymarket_client_sdk::clob::types::{
     Amount,
@@ -19,7 +21,7 @@ use serde_json;
 use sha2::Sha256;
 use std::{str::FromStr, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::{Config, ExecutionMode};
@@ -172,6 +174,11 @@ pub struct PolymarketClient {
     api_creds: Mutex<Option<ApiCreds>>,
     /// Cache (slug → MarketInfo) : un marché actif à la fois, renouvelé si le slug change.
     market_cache: Mutex<Option<(String, MarketInfo)>>,
+    /// Client SDK authentifié, créé une seule fois et réutilisé pour tous les ordres.
+    /// Conserve les caches internes (tick_size, fee_rate_bps) entre les appels.
+    sdk_client: Mutex<Option<SdkClobClient<Authenticated<Normal>>>>,
+    /// Signer SDK pré-construit avec chain_id, réutilisé pour signer les ordres.
+    sdk_signer: Option<PrivateKeySigner>,
 }
 
 impl PolymarketClient {
@@ -194,12 +201,22 @@ impl PolymarketClient {
             }
         });
 
+        // Pré-construire le signer SDK avec chain_id pour réutilisation
+        let sdk_signer = config.evm_private_key.as_deref().and_then(|pk| {
+            let pk = pk.trim_start_matches("0x");
+            PrivateKeySigner::from_str(pk)
+                .ok()
+                .map(|s| s.with_chain_id(Some(POLYGON)))
+        });
+
         Self {
             config,
             http,
             signer,
             api_creds: Mutex::new(None),
             market_cache: Mutex::new(None),
+            sdk_client: Mutex::new(None),
+            sdk_signer,
         }
     }
 
@@ -209,6 +226,11 @@ impl PolymarketClient {
         match self.http.get(format!("{}/ok", CLOB_API_BASE)).send().await {
             Ok(_) => info!("Connexion CLOB Polymarket pré-chauffée"),
             Err(e) => warn!("warm_up CLOB échoué (non bloquant): {}", e),
+        }
+        // Pré-créer le client SDK authentifié pour que le premier ordre soit aussi rapide que les suivants.
+        match self.get_or_create_sdk_client().await {
+            Ok(_) => info!("Client SDK Polymarket pré-authentifié"),
+            Err(e) => warn!("warm_up SDK échoué (non bloquant): {}", e),
         }
     }
 
@@ -224,6 +246,8 @@ impl PolymarketClient {
     /// Résout slug → condition_id + tokenIds UP/DOWN via l'API Gamma Polymarket.
     /// Résultat mis en cache : un seul appel réseau par slug distinct.
     pub async fn resolve_market(&self, slug: &str) -> Result<MarketInfo> {
+        use std::time::Instant;
+
         {
             let cache = self.market_cache.lock().await;
             if let Some((cached_slug, info)) = cache.as_ref() {
@@ -233,6 +257,7 @@ impl PolymarketClient {
             }
         }
 
+        let t_resolve = Instant::now();
         let url = format!("{}/markets?slug={}", GAMMA_API_BASE, slug);
         let resp = self
             .http
@@ -240,6 +265,7 @@ impl PolymarketClient {
             .send()
             .await
             .map_err(|e| anyhow!("Gamma API GET échoué: {}", e))?;
+        let gamma_http_ms = t_resolve.elapsed().as_millis();
 
         if !resp.status().is_success() {
             return Err(anyhow!(
@@ -294,12 +320,28 @@ impl PolymarketClient {
             order_min_size: market.order_min_size,
         };
 
-        info!(
-            "Marché résolu: slug={} condition_id={} UP={} DOWN={}",
-            slug, info.condition_id, info.up_token_id, info.down_token_id
+        debug!(
+            "Marché résolu: slug={} condition_id={} UP={} DOWN={} | timing: gamma_http={}ms total={}ms",
+            slug, info.condition_id, info.up_token_id, info.down_token_id,
+            gamma_http_ms, t_resolve.elapsed().as_millis()
         );
         *self.market_cache.lock().await = Some((slug.to_string(), info.clone()));
         Ok(info)
+    }
+
+    /// Pré-chauffe les caches SDK (tick_size, fee_rate_bps, neg_risk) pour les tokens
+    /// d'un marché résolu. À appeler après resolve_market pour que build() soit instantané.
+    pub async fn warm_sdk_caches(&self, market: &MarketInfo) {
+        let client = match self.get_or_create_sdk_client().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        // Pré-fetch tick_size + fee_rate_bps + neg_risk pour les deux tokens (UP et DOWN).
+        // Les erreurs sont ignorées — ce n'est qu'un warm-up.
+        for token_id in [&market.up_token_id, &market.down_token_id] {
+            let _ = client.tick_size(token_id).await;
+            let _ = client.fee_rate_bps(token_id).await;
+        }
     }
 
     /// Place un ordre sur Polymarket selon le signal reçu.
@@ -836,22 +878,24 @@ impl PolymarketClient {
         Ok(URL_SAFE.encode(result))
     }
 
-    async fn submit_market_order(
-        &self,
-        token_id_str: &str,
-        submitted_at: DateTime<Utc>,
-    ) -> Result<OrderResult> {
-        let private_key = self
-            .config
-            .evm_private_key
-            .as_deref()
+    /// Retourne le client SDK authentifié, le créant au premier appel puis le réutilisant.
+    /// Élimine le coût de authenticate() + dérivation API key à chaque ordre (~400ms).
+    /// Les caches internes du SDK (tick_size, fee_rate_bps) sont aussi conservés.
+    async fn get_or_create_sdk_client(&self) -> Result<SdkClobClient<Authenticated<Normal>>> {
+        let mut guard = self.sdk_client.lock().await;
+        if let Some(client) = guard.as_ref() {
+            return Ok(client.clone());
+        }
+
+        let sdk_signer = self
+            .sdk_signer
+            .as_ref()
             .ok_or_else(|| anyhow!("POLYMARKET_PRIVATE_KEY requis pour le mode Market"))?;
-        let signer = PrivateKeySigner::from_str(private_key.trim_start_matches("0x"))
-            .map_err(|e| anyhow!("POLYMARKET_PRIVATE_KEY invalide: {}", e))?
-            .with_chain_id(Some(POLYGON));
+
         let auth_builder = SdkClobClient::new(CLOB_API_BASE, SdkConfig::default())
             .map_err(|e| anyhow!("SDK client init: {}", e))?
-            .authentication_builder(&signer);
+            .authentication_builder(sdk_signer);
+
         let client = if let Some(funder) = self.config.polymarket_funder.as_deref() {
             let funder = Address::from_str(funder)
                 .map_err(|e| anyhow!("POLYMARKET_FUNDER invalide: {}", e))?;
@@ -879,30 +923,67 @@ impl PolymarketClient {
                 .map_err(|e| anyhow!("SDK authenticate: {}", e))?
         };
 
+        info!("Client SDK Polymarket authentifié et mis en cache");
+        *guard = Some(client.clone());
+        Ok(client)
+    }
+
+    async fn submit_market_order(
+        &self,
+        token_id_str: &str,
+        submitted_at: DateTime<Utc>,
+    ) -> Result<OrderResult> {
+        use std::time::Instant;
+
+        let sdk_signer = self
+            .sdk_signer
+            .as_ref()
+            .ok_or_else(|| anyhow!("POLYMARKET_PRIVATE_KEY requis pour le mode Market"))?;
+
+        let t0 = Instant::now();
+        let client = self.get_or_create_sdk_client().await?;
+        let sdk_client_ms = t0.elapsed().as_millis();
+
         let amount = Decimal::from_str(&format!("{:.6}", self.config.trade_amount_usdc))
             .map_err(|e| anyhow!("montant Decimal invalide: {}", e))?;
+
+        // Prix plafond 0.99 : le CLOB matche au meilleur ask disponible.
+        // Évite le fetch de l'order book (~200-250ms) à chaque ordre.
+        let max_price = Decimal::from_str("0.99")
+            .map_err(|e| anyhow!("prix max Decimal invalide: {}", e))?;
+
+        let t1 = Instant::now();
         let order = client
             .market_order()
             .token_id(token_id_str)
             .amount(Amount::usdc(amount).map_err(|e| anyhow!("Amount::usdc: {}", e))?)
+            .price(max_price)
             .side(SdkSide::Buy)
             .order_type(SdkOrderType::FOK)
             .build()
             .await
             .map_err(|e| anyhow!("SDK build market_order: {}", e))?;
+        let build_ms = t1.elapsed().as_millis();
+
+        let t2 = Instant::now();
         let signed_order = client
-            .sign(&signer, order)
+            .sign(sdk_signer, order)
             .await
             .map_err(|e| anyhow!("SDK sign order: {}", e))?;
+        let sign_ms = t2.elapsed().as_millis();
+
+        let t3 = Instant::now();
         let resp = client
             .post_order(signed_order)
             .await
             .map_err(|e| anyhow!("SDK post_order: {}", e))?;
+        let post_ms = t3.elapsed().as_millis();
         let ack_at = Utc::now();
 
         info!(
-            "Ordre FOK envoyé via SDK | token={} amount={}USDC",
-            token_id_str, self.config.trade_amount_usdc
+            "Ordre FOK envoyé via SDK | token={} amount={}USDC | timing: sdk_client={}ms build={}ms sign={}ms post={}ms total={}ms",
+            token_id_str, self.config.trade_amount_usdc,
+            sdk_client_ms, build_ms, sign_ms, post_ms, t0.elapsed().as_millis()
         );
 
         Ok(OrderResult {

@@ -118,11 +118,25 @@ async fn main() -> Result<()> {
             &candle.close_time,
         );
 
-        tracker
-            .validate_with_closed_candle(candle.close_time, candle.is_green())
-            .await;
+        // Slug du marché COURANT (pré-fetché par la bougie précédente → cache hit)
+        let next_open_ms = (candle.close_time + chrono::Duration::milliseconds(1))
+            .timestamp_millis();
+        let slug = PolymarketClient::build_slug(next_open_ms);
 
         let Some(signal) = signal else {
+            tracker
+                .validate_with_closed_candle(candle.close_time, candle.is_green())
+                .await;
+            // Pas de signal : pré-fetch du marché SUIVANT + warm caches pour la prochaine bougie
+            let poly = poly_client.clone();
+            let future_open_ms = (candle.close_time + interval_duration + chrono::Duration::milliseconds(1))
+                .timestamp_millis();
+            let future_slug = PolymarketClient::build_slug(future_open_ms);
+            tokio::spawn(async move {
+                if let Ok(market) = poly.resolve_market(&future_slug).await {
+                    poly.warm_sdk_caches(&market).await;
+                }
+            });
             continue;
         };
 
@@ -132,10 +146,6 @@ async fn main() -> Result<()> {
             signal.rsi,
         );
 
-        // P9 : slug sur le timestamp d'ouverture de la PROCHAINE bougie (close_time + 1ms)
-        let next_open_ms = (candle.close_time + chrono::Duration::milliseconds(1))
-            .timestamp_millis();
-        let slug = PolymarketClient::build_slug(next_open_ms);
         let target_close_time = candle.close_time + interval_duration;
         let signal_key = build_signal_key(&signal.strategy_name, &slug, &signal.prediction);
 
@@ -144,6 +154,9 @@ async fn main() -> Result<()> {
                 "Signal déjà en cours de suivi — ordre ignoré | signal_key={}",
                 signal_key
             );
+            tracker
+                .validate_with_closed_candle(candle.close_time, candle.is_green())
+                .await;
             continue;
         }
         match trade_logger.has_signal_key(&signal_key) {
@@ -152,6 +165,9 @@ async fn main() -> Result<()> {
                     "Signal déjà exécuté précédemment — ordre ignoré | signal_key={}",
                     signal_key
                 );
+                tracker
+                    .validate_with_closed_candle(candle.close_time, candle.is_green())
+                    .await;
                 continue;
             }
             Ok(false) => {}
@@ -163,10 +179,15 @@ async fn main() -> Result<()> {
             }
         }
 
+        // Marché pré-fetché par la bougie précédente → cache hit (~0ms).
+        // Premier signal après restart → fetch normal (~100ms).
         let market = match poly_client.resolve_market(&slug).await {
             Ok(m) => m,
             Err(e) => {
                 error!("Impossible de résoudre le marché Polymarket: {}", e);
+                tracker
+                    .validate_with_closed_candle(candle.close_time, candle.is_green())
+                    .await;
                 continue;
             }
         };
@@ -257,6 +278,22 @@ async fn main() -> Result<()> {
                 order_result.status.clone(),
             )
             .await;
+
+        // Validation tracker + pré-fetch du marché suivant après l'ordre
+        tracker
+            .validate_with_closed_candle(candle.close_time, candle.is_green())
+            .await;
+        {
+            let poly = poly_client.clone();
+            let future_open_ms = (candle.close_time + interval_duration + chrono::Duration::milliseconds(1))
+                .timestamp_millis();
+            let future_slug = PolymarketClient::build_slug(future_open_ms);
+            tokio::spawn(async move {
+                if let Ok(market) = poly.resolve_market(&future_slug).await {
+                    poly.warm_sdk_caches(&market).await;
+                }
+            });
+        }
     }
 
     Ok(())
