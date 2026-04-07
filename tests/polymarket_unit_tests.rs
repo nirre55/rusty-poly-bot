@@ -7,7 +7,7 @@ use std::str::FromStr;
 #[test]
 fn test_build_slug() {
     // 1710000000000 ms → 1710000000 s
-    let slug = PolymarketClient::build_slug(1710000000000);
+    let slug = PolymarketClient::build_slug("btc-updown-5m", 1710000000000);
     assert_eq!(slug, "btc-updown-5m-1710000000");
 }
 

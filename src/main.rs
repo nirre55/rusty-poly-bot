@@ -29,6 +29,37 @@ fn parse_interval_duration(interval: &str) -> Result<Duration> {
     }
 }
 
+fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
+    match config.strategy.as_str() {
+        "three_candle_rsi7_reversal" => Ok(Box::new(ThreeCandleRsi7Reversal::new(
+            config.rsi_overbought,
+            config.rsi_oversold,
+        ))),
+        other => anyhow::bail!(
+            "Stratégie '{}' inconnue. Stratégies disponibles: three_candle_rsi7_reversal",
+            other
+        ),
+    }
+}
+
+/// Pré-fetch du marché suivant + warm caches SDK en arrière-plan.
+fn spawn_prefetch_next_market(
+    poly_client: &Arc<PolymarketClient>,
+    close_time: chrono::DateTime<Utc>,
+    interval_duration: Duration,
+    slug_prefix: &str,
+) {
+    let poly = poly_client.clone();
+    let future_open_ms =
+        (close_time + interval_duration + chrono::Duration::milliseconds(1)).timestamp_millis();
+    let future_slug = PolymarketClient::build_slug(slug_prefix, future_open_ms);
+    tokio::spawn(async move {
+        if let Ok(market) = poly.resolve_market(&future_slug).await {
+            poly.warm_sdk_caches(&market).await;
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -41,14 +72,15 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     let interval_duration = parse_interval_duration(&config.interval)?;
     info!(
-        "Démarrage rusty-poly-bot | mode={:?} symbol={} interval={}",
-        config.execution_mode, config.symbol, config.interval
+        "Démarrage rusty-poly-bot | mode={:?} symbol={} interval={} strategy={} rsi=[{},{}]",
+        config.execution_mode, config.symbol, config.interval,
+        config.strategy, config.rsi_oversold, config.rsi_overbought
     );
 
     let trade_logger = Arc::new(TradeLogger::new(&config.logs_dir)?);
     let poly_client = Arc::new(PolymarketClient::new(config.clone()));
     poly_client.warm_up().await;
-    let mut active_strategy: Box<dyn Strategy> = Box::new(ThreeCandleRsi7Reversal::new());
+    let mut active_strategy = create_strategy(&config)?;
 
     // Tracker V3 : suit les ordres ouverts et met à jour outcome dans le CSV
     let tracker = Arc::new(PositionTracker::new(
@@ -121,22 +153,13 @@ async fn main() -> Result<()> {
         // Slug du marché COURANT (pré-fetché par la bougie précédente → cache hit)
         let next_open_ms = (candle.close_time + chrono::Duration::milliseconds(1))
             .timestamp_millis();
-        let slug = PolymarketClient::build_slug(next_open_ms);
+        let slug = PolymarketClient::build_slug(&config.polymarket_slug_prefix, next_open_ms);
 
         let Some(signal) = signal else {
             tracker
                 .validate_with_closed_candle(candle.close_time, candle.is_green())
                 .await;
-            // Pas de signal : pré-fetch du marché SUIVANT + warm caches pour la prochaine bougie
-            let poly = poly_client.clone();
-            let future_open_ms = (candle.close_time + interval_duration + chrono::Duration::milliseconds(1))
-                .timestamp_millis();
-            let future_slug = PolymarketClient::build_slug(future_open_ms);
-            tokio::spawn(async move {
-                if let Ok(market) = poly.resolve_market(&future_slug).await {
-                    poly.warm_sdk_caches(&market).await;
-                }
-            });
+            spawn_prefetch_next_market(&poly_client, candle.close_time, interval_duration, &config.polymarket_slug_prefix);
             continue;
         };
 
@@ -283,17 +306,7 @@ async fn main() -> Result<()> {
         tracker
             .validate_with_closed_candle(candle.close_time, candle.is_green())
             .await;
-        {
-            let poly = poly_client.clone();
-            let future_open_ms = (candle.close_time + interval_duration + chrono::Duration::milliseconds(1))
-                .timestamp_millis();
-            let future_slug = PolymarketClient::build_slug(future_open_ms);
-            tokio::spawn(async move {
-                if let Ok(market) = poly.resolve_market(&future_slug).await {
-                    poly.warm_sdk_caches(&market).await;
-                }
-            });
-        }
+        spawn_prefetch_next_market(&poly_client, candle.close_time, interval_duration, &config.polymarket_slug_prefix);
     }
 
     Ok(())

@@ -35,7 +35,7 @@ fn feed(
 
 #[test]
 fn test_color_none_before_three_candles() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     s.on_closed_candle(&make_candle(100.0, 101.0));
     assert!(s.last_three_same_color().is_none());
     s.on_closed_candle(&make_candle(101.0, 102.0));
@@ -44,7 +44,7 @@ fn test_color_none_before_three_candles() {
 
 #[test]
 fn test_color_three_green() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     s.on_closed_candle(&make_candle(100.0, 101.0));
     s.on_closed_candle(&make_candle(101.0, 102.0));
     s.on_closed_candle(&make_candle(102.0, 103.0));
@@ -53,7 +53,7 @@ fn test_color_three_green() {
 
 #[test]
 fn test_color_three_red() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     s.on_closed_candle(&make_candle(103.0, 100.0));
     s.on_closed_candle(&make_candle(100.0, 98.0));
     s.on_closed_candle(&make_candle(98.0, 95.0));
@@ -62,7 +62,7 @@ fn test_color_three_red() {
 
 #[test]
 fn test_color_mixed_is_none() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     s.on_closed_candle(&make_candle(100.0, 101.0)); // vert
     s.on_closed_candle(&make_candle(101.0, 99.0));  // rouge
     s.on_closed_candle(&make_candle(99.0, 100.0));  // vert
@@ -75,7 +75,7 @@ fn test_color_mixed_is_none() {
 
 #[test]
 fn test_rsi_none_with_fewer_than_eight_candles() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     // RSI_PERIOD=7 → besoin de RSI_PERIOD+1=8 bougies (7 deltas)
     for i in 0..7 {
         s.on_closed_candle(&make_candle(100.0 + i as f64, 101.0 + i as f64));
@@ -87,7 +87,7 @@ fn test_rsi_none_with_fewer_than_eight_candles() {
 
 #[test]
 fn test_rsi_all_gains_gives_100() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     for i in 0..=7 {
         s.on_closed_candle(&make_candle(100.0 + i as f64, 101.0 + i as f64));
     }
@@ -97,7 +97,7 @@ fn test_rsi_all_gains_gives_100() {
 /// Marché plat (tous doji) : avg_loss=0 → RSI=100, comportement identique Python.
 #[test]
 fn test_rsi_flat_market_gives_100() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     for _ in 0..=7 {
         s.on_closed_candle(&make_candle(100.0, 100.0));
     }
@@ -110,7 +110,7 @@ fn test_rsi_flat_market_gives_100() {
 
 #[test]
 fn test_rsi_all_losses_gives_zero() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     for i in 0..=7 {
         s.on_closed_candle(&make_candle(108.0 - i as f64, 107.0 - i as f64));
     }
@@ -119,7 +119,7 @@ fn test_rsi_all_losses_gives_zero() {
 
 #[test]
 fn test_rsi_value_in_valid_range() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     // Alternance : 4 hausses, 3 baisses
     let candles = [(100., 102.), (102., 100.), (100., 102.), (102., 100.),
                    (100., 102.), (102., 100.), (100., 102.), (102., 104.)];
@@ -136,7 +136,7 @@ fn test_rsi_value_in_valid_range() {
 
 #[test]
 fn test_no_signal_before_rsi_warmup() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     for i in 0..7 {
         let sig = s.on_closed_candle(&make_candle(100.0 + i as f64, 110.0 + i as f64));
         assert!(sig.is_none(), "Pas de signal avant le warmup RSI");
@@ -145,7 +145,7 @@ fn test_no_signal_before_rsi_warmup() {
 
 #[test]
 fn test_no_signal_without_three_same_color() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     let candles: Vec<(f64, f64)> = (0..11)
         .map(|i| if i % 2 == 0 { (100.0, 101.0) } else { (101.0, 100.0) })
         .collect();
@@ -155,7 +155,7 @@ fn test_no_signal_without_three_same_color() {
 /// RSI ≈ 42.86 (neutre) + 3 bougies vertes → pas de signal DOWN (RSI < 65)
 #[test]
 fn test_no_signal_rsi_neutral_with_green_series() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     // Seed 5 bougies rouges : closes 110, 108, 106, 104, 102
     for &close in &[110.0f64, 108.0, 106.0, 104.0, 102.0] {
         s.on_closed_candle(&make_candle(close + 3.0, close));
@@ -173,7 +173,7 @@ fn test_no_signal_rsi_neutral_with_green_series() {
 /// RSI Wilder ~57 (neutre) + 3 bougies vertes → pas de signal (RSI < 65)
 #[test]
 fn test_no_signal_rsi_in_neutral_zone() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     // Closes: 100,100,100,100,95,100,95,99,100,101,102
     // Wilder RSI après 11 bougies ≈ 57 (entre 35 et 65) → pas de signal
     let candles = [
@@ -187,7 +187,7 @@ fn test_no_signal_rsi_in_neutral_zone() {
 
 #[test]
 fn test_signal_down_on_three_green_high_rsi() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     // 15 bougies continues à la hausse → RSI=100 ≥ 65, ATR prêt, 3 dernières vertes → DOWN
     // open[i+1] = close[i] (pas de gap → TR = high-low)
     let candles: Vec<(f64, f64)> = (0..15)
@@ -200,7 +200,7 @@ fn test_signal_down_on_three_green_high_rsi() {
 
 #[test]
 fn test_signal_up_on_three_red_low_rsi() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     // 15 bougies continues à la baisse → RSI=0 ≤ 35, ATR prêt, 3 dernières rouges → UP
     let candles: Vec<(f64, f64)> = (0..15)
         .map(|i| (300.0 - i as f64 * 2.0, 298.0 - i as f64 * 2.0))
@@ -212,7 +212,7 @@ fn test_signal_up_on_three_red_low_rsi() {
 
 #[test]
 fn test_signal_contains_strategy_name() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     let candles: Vec<(f64, f64)> = (0..15)
         .map(|i| (100.0 + i as f64 * 2.0, 102.0 + i as f64 * 2.0))
         .collect();
@@ -222,7 +222,7 @@ fn test_signal_contains_strategy_name() {
 
 #[test]
 fn test_signal_rsi_in_valid_range() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     let candles: Vec<(f64, f64)> = (0..15)
         .map(|i| (100.0 + i as f64 * 2.0, 102.0 + i as f64 * 2.0))
         .collect();
@@ -232,7 +232,7 @@ fn test_signal_rsi_in_valid_range() {
 
 #[test]
 fn test_signal_close_time_is_not_epoch() {
-    let mut s = ThreeCandleRsi7Reversal::new();
+    let mut s = ThreeCandleRsi7Reversal::new(65.0, 35.0);
     let candles: Vec<(f64, f64)> = (0..15)
         .map(|i| (100.0 + i as f64 * 2.0, 102.0 + i as f64 * 2.0))
         .collect();

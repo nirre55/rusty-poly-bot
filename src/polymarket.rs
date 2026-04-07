@@ -235,12 +235,11 @@ impl PolymarketClient {
     }
 
     /// Construit le slug Polymarket depuis le timestamp d'ouverture de la bougie cible.
-    /// Format : `btc-updown-5m-<UNIX_TIMESTAMP_SECONDES>`
+    /// Format : `{prefix}-<UNIX_TIMESTAMP_SECONDES>`
     /// Exemple : "btc-updown-5m-1742256301"
-    /// Identique à la logique Python : f"{prefix}-{target_open_ms // 1000}"
-    pub fn build_slug(open_time_ms: i64) -> String {
+    pub fn build_slug(prefix: &str, open_time_ms: i64) -> String {
         let unix_secs = open_time_ms / 1000;
-        format!("btc-updown-5m-{}", unix_secs)
+        format!("{}-{}", prefix, unix_secs)
     }
 
     /// Résout slug → condition_id + tokenIds UP/DOWN via l'API Gamma Polymarket.

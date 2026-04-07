@@ -40,6 +40,14 @@ pub struct Config {
     pub polymarket_funder: Option<String>,
     /// Signature type Polymarket: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE.
     pub polymarket_signature_type: Option<u8>,
+    /// Nom de la stratégie à utiliser (ex: "three_candle_rsi7_reversal").
+    pub strategy: String,
+    /// Seuil RSI haut (suracheté) — signal DOWN si RSI >= ce seuil. Défaut: 65.0
+    pub rsi_overbought: f64,
+    /// Seuil RSI bas (survendu) — signal UP si RSI <= ce seuil. Défaut: 35.0
+    pub rsi_oversold: f64,
+    /// Préfixe slug Polymarket (ex: "btc-updown-5m"). Format final: {prefix}-{timestamp}
+    pub polymarket_slug_prefix: String,
 }
 
 impl std::fmt::Debug for Config {
@@ -57,6 +65,10 @@ impl std::fmt::Debug for Config {
             .field("evm_private_key", &"[REDACTED]")
             .field("polymarket_funder", &self.polymarket_funder)
             .field("polymarket_signature_type", &self.polymarket_signature_type)
+            .field("strategy", &self.strategy)
+            .field("rsi_overbought", &self.rsi_overbought)
+            .field("rsi_oversold", &self.rsi_oversold)
+            .field("polymarket_slug_prefix", &self.polymarket_slug_prefix)
             .finish()
     }
 }
@@ -121,6 +133,15 @@ impl Config {
             Err(_) => None,
         };
 
+        let rsi_overbought = env::var("RSI_OVERBOUGHT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(65.0);
+        let rsi_oversold = env::var("RSI_OVERSOLD")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(35.0);
+
         Ok(Config {
             binance_ws_url: env::var("BINANCE_WS_URL")
                 .unwrap_or_else(|_| "wss://stream.binance.com:9443/ws".to_string()),
@@ -136,6 +157,12 @@ impl Config {
             evm_private_key: env::var("POLYMARKET_PRIVATE_KEY").ok(),
             polymarket_funder: env::var("POLYMARKET_FUNDER").ok(),
             polymarket_signature_type,
+            strategy: env::var("STRATEGY")
+                .unwrap_or_else(|_| "three_candle_rsi7_reversal".to_string()),
+            rsi_overbought,
+            rsi_oversold,
+            polymarket_slug_prefix: env::var("POLYMARKET_SLUG_PREFIX")
+                .unwrap_or_else(|_| "btc-updown-5m".to_string()),
         })
     }
 }

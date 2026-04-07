@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     let now_ms = Utc::now().timestamp_millis();
     let interval_ms = 5 * 60 * 1000i64;
     let next_open_ms = (now_ms / interval_ms + 1) * interval_ms;
-    let slug = PolymarketClient::build_slug(next_open_ms);
+    let slug = PolymarketClient::build_slug("btc-updown-5m", next_open_ms);
     let gamma_url = format!("https://gamma-api.polymarket.com/markets?slug={}", slug);
 
     println!("[1b] Vérification Gamma API pour slug={}", slug);

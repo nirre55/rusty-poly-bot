@@ -51,10 +51,14 @@ pub struct ThreeCandleRsi7Reversal {
     true_ranges: Vec<f64>,
     /// ATR14 courant (None tant que ATR_PERIOD True Ranges n'ont pas été accumulés).
     atr: Option<f64>,
+    /// Seuil RSI suracheté (signal DOWN si RSI >= ce seuil).
+    rsi_overbought: f64,
+    /// Seuil RSI survendu (signal UP si RSI <= ce seuil).
+    rsi_oversold: f64,
 }
 
 impl ThreeCandleRsi7Reversal {
-    pub fn new() -> Self {
+    pub fn new(rsi_overbought: f64, rsi_oversold: f64) -> Self {
         Self {
             recent: Vec::with_capacity(STREAK + 1),
             last_close: None,
@@ -65,6 +69,8 @@ impl ThreeCandleRsi7Reversal {
             rsi: None,
             true_ranges: Vec::with_capacity(ATR_PERIOD),
             atr: None,
+            rsi_overbought,
+            rsi_oversold,
         }
     }
 
@@ -196,14 +202,14 @@ impl Strategy for ThreeCandleRsi7Reversal {
 
         let prediction = if is_green_series {
             // 3 VERTE + RSI suracheté => reversal DOWN
-            if rsi >= 65.0 {
+            if rsi >= self.rsi_overbought {
                 Some(Prediction::Down)
             } else {
                 None
             }
         } else {
             // 3 ROUGE + RSI survendu => reversal UP
-            if rsi <= 35.0 {
+            if rsi <= self.rsi_oversold {
                 Some(Prediction::Up)
             } else {
                 None

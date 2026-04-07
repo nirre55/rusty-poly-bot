@@ -30,6 +30,10 @@ fn make_config(logs_dir: &str) -> Config {
         evm_private_key: None,
         polymarket_funder: None,
         polymarket_signature_type: None,
+        strategy: "three_candle_rsi7_reversal".to_string(),
+        rsi_overbought: 65.0,
+        rsi_oversold: 35.0,
+        polymarket_slug_prefix: "btc-updown-5m".to_string(),
     }
 }
 

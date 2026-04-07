@@ -17,6 +17,10 @@ fn make_config(mode: ExecutionMode) -> Config {
         evm_private_key: None,
         polymarket_funder: None,
         polymarket_signature_type: None,
+        strategy: "three_candle_rsi7_reversal".to_string(),
+        rsi_overbought: 65.0,
+        rsi_oversold: 35.0,
+        polymarket_slug_prefix: "btc-updown-5m".to_string(),
     }
 }
 
@@ -44,20 +48,20 @@ fn make_market() -> MarketInfo {
 #[test]
 fn test_build_slug_known_timestamp() {
     // 1710000000000 ms → Unix 1710000000 s
-    let slug = PolymarketClient::build_slug(1710000000000);
+    let slug = PolymarketClient::build_slug("btc-updown-5m",1710000000000);
     assert_eq!(slug, "btc-updown-5m-1710000000");
 }
 
 #[test]
 fn test_build_slug_format_prefix() {
-    let slug = PolymarketClient::build_slug(1710000000000);
+    let slug = PolymarketClient::build_slug("btc-updown-5m",1710000000000);
     assert!(slug.starts_with("btc-updown-5m-"));
 }
 
 #[test]
 fn test_build_slug_suffix_is_unix_seconds() {
     // Le suffixe est le timestamp en secondes (pas YYYYMMDD)
-    let slug = PolymarketClient::build_slug(1710000000000);
+    let slug = PolymarketClient::build_slug("btc-updown-5m",1710000000000);
     let suffix = slug.strip_prefix("btc-updown-5m-").unwrap();
     assert_eq!(suffix, "1710000000");
     assert!(suffix.chars().all(|c| c.is_ascii_digit()));
@@ -66,15 +70,15 @@ fn test_build_slug_suffix_is_unix_seconds() {
 #[test]
 fn test_build_slug_ms_to_seconds_truncation() {
     // 1704067200000 ms → 1704067200 s
-    let slug = PolymarketClient::build_slug(1704067200000);
+    let slug = PolymarketClient::build_slug("btc-updown-5m",1704067200000);
     assert_eq!(slug, "btc-updown-5m-1704067200");
 }
 
 #[test]
 fn test_build_slug_different_candles_produce_different_slugs() {
     // Deux bougies 5m consécutives (300 000 ms d'écart)
-    let slug1 = PolymarketClient::build_slug(1710000000000);
-    let slug2 = PolymarketClient::build_slug(1710000300000);
+    let slug1 = PolymarketClient::build_slug("btc-updown-5m",1710000000000);
+    let slug2 = PolymarketClient::build_slug("btc-updown-5m",1710000300000);
     assert_ne!(slug1, slug2);
 }
 
