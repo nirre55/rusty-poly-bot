@@ -17,11 +17,13 @@ pub struct MoneyManager {
     base_amount: f64,
     multiplier: f64,
     consecutive_losses: u32,
+    /// Montant maximum autorisé (0.0 = pas de plafond).
+    max_amount: f64,
     state_path: PathBuf,
 }
 
 impl MoneyManager {
-    pub fn new(base_amount: f64, multiplier: f64, logs_dir: &str) -> Self {
+    pub fn new(base_amount: f64, multiplier: f64, max_amount: f64, logs_dir: &str) -> Self {
         let state_path = PathBuf::from(logs_dir).join("money_state.json");
         let consecutive_losses = Self::load_state(&state_path);
         if consecutive_losses > 0 {
@@ -31,17 +33,29 @@ impl MoneyManager {
                 base_amount * multiplier.powi(consecutive_losses as i32)
             );
         }
+        if max_amount > 0.0 {
+            info!(
+                "[MONEY] Plafond Martingale = {:.2} USDC",
+                max_amount
+            );
+        }
         Self {
             base_amount,
             multiplier,
             consecutive_losses,
+            max_amount,
             state_path,
         }
     }
 
-    /// Montant courant à miser : base × multiplier^consecutive_losses
+    /// Montant courant à miser : base × multiplier^consecutive_losses, plafonné à max_amount.
     pub fn current_amount(&self) -> f64 {
-        self.base_amount * self.multiplier.powi(self.consecutive_losses as i32)
+        let amount = self.base_amount * self.multiplier.powi(self.consecutive_losses as i32);
+        if self.max_amount > 0.0 {
+            amount.min(self.max_amount)
+        } else {
+            amount
+        }
     }
 
     /// Nombre de losses consécutifs en cours.

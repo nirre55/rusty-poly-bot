@@ -87,6 +87,7 @@ async fn main() -> Result<()> {
     let money_manager = Arc::new(tokio::sync::Mutex::new(MoneyManager::new(
         config.trade_amount_usdc,
         config.martingale_multiplier,
+        config.martingale_max_amount,
         &config.logs_dir,
     )));
     if config.martingale_multiplier > 1.0 {

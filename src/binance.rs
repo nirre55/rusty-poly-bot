@@ -129,7 +129,9 @@ pub async fn stream_candles(
     tx: mpsc::Sender<Candle>,
 ) -> Result<()> {
     let ws_url = format!("{}/{symbol}@kline_{interval}", url);
-    info!("Connecting to Binance WebSocket: {}", ws_url);
+    info!("Connexion au WebSocket Binance: {}", ws_url);
+
+    let mut reconnect_delay_secs = 5u64;
 
     loop {
         // P6 : timeout sur la tentative de connexion WebSocket
@@ -138,7 +140,8 @@ pub async fn stream_candles(
 
         match connect_result {
             Ok(Ok((ws_stream, _))) => {
-                info!("Connected to Binance WebSocket");
+                info!("Connecté au WebSocket Binance");
+                reconnect_delay_secs = 5; // reset après connexion réussie
                 let (_, mut read) = ws_stream.split();
 
                 while let Some(msg) = read.next().await {
@@ -247,11 +250,11 @@ pub async fn stream_candles(
                         }
                         Ok(Message::Ping(_)) => {}
                         Ok(Message::Close(_)) => {
-                            warn!("WebSocket closed, reconnecting...");
+                            warn!("WebSocket fermé, reconnexion…");
                             break;
                         }
                         Err(e) => {
-                            error!("WebSocket error: {}", e);
+                            error!("Erreur WebSocket: {}", e);
                             break;
                         }
                         _ => {}
@@ -266,7 +269,11 @@ pub async fn stream_candles(
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        info!("Reconnecting to Binance WebSocket...");
+        info!(
+            "Reconnexion au WebSocket Binance dans {}s…",
+            reconnect_delay_secs
+        );
+        tokio::time::sleep(Duration::from_secs(reconnect_delay_secs)).await;
+        reconnect_delay_secs = (reconnect_delay_secs * 2).min(120);
     }
 }

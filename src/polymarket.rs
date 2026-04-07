@@ -1,7 +1,6 @@
 use alloy::primitives::{keccak256, Address, B256, U256};
 use alloy::signers::{local::PrivateKeySigner, Signer};
 use anyhow::{anyhow, Result};
-use backoff::{future::retry, ExponentialBackoffBuilder};
 use base64::{engine::general_purpose::URL_SAFE, Engine};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -93,78 +92,6 @@ struct ApiKeyResponse {
     passphrase: String,
 }
 
-#[allow(dead_code)]
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OrderPayload {
-    salt: String,
-    maker: String,
-    signer: String,
-    taker: String,
-    token_id: String,
-    maker_amount: String,
-    taker_amount: String,
-    expiration: String,
-    nonce: String,
-    fee_rate_bps: String,
-    side: String,
-    signature_type: u8,   // entier, pas string (Polymarket Python client: signatureType = 0)
-    signature: String,
-}
-
-#[allow(dead_code)]
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PostOrderBody {
-    order: OrderPayload,
-    owner: String,
-    order_type: String,
-    post_only: bool,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct PostOrderResponse {
-    #[serde(default)]
-    success: bool,
-    #[serde(rename = "orderID", default)]
-    order_id: String,
-    #[serde(default)]
-    status: String,
-    /// Polymarket renvoie "errorMsg" sur les succès partiels et "error" sur les rejets
-    #[serde(rename = "errorMsg", alias = "error", default)]
-    error_msg: String,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct TickSizeResponse {
-    minimum_tick_size: f64,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct FeeRateResponse {
-    #[serde(default)]
-    base_fee: u64,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct OrderBookLevel {
-    price: String,
-    size: String,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct OrderBookResponse {
-    #[serde(default)]
-    asks: Vec<OrderBookLevel>,
-    #[serde(default)]
-    bids: Vec<OrderBookLevel>,
-}
-
 // ── Client ────────────────────────────────────────────────────────────────────
 
 pub struct PolymarketClient {
@@ -190,10 +117,10 @@ impl PolymarketClient {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
-        let signer = config.evm_private_key.as_deref().and_then(|pk| {
+        let parsed_pk = config.evm_private_key.as_deref().and_then(|pk| {
             let pk = pk.trim_start_matches("0x");
             match PrivateKeySigner::from_str(pk) {
-                Ok(s) => Some(Arc::new(s)),
+                Ok(s) => Some(s),
                 Err(e) => {
                     warn!("POLYMARKET_PRIVATE_KEY invalide — mode réel désactivé: {}", e);
                     None
@@ -201,13 +128,8 @@ impl PolymarketClient {
             }
         });
 
-        // Pré-construire le signer SDK avec chain_id pour réutilisation
-        let sdk_signer = config.evm_private_key.as_deref().and_then(|pk| {
-            let pk = pk.trim_start_matches("0x");
-            PrivateKeySigner::from_str(pk)
-                .ok()
-                .map(|s| s.with_chain_id(Some(POLYGON)))
-        });
+        let signer = parsed_pk.as_ref().map(|s| Arc::new(s.clone()));
+        let sdk_signer = parsed_pk.map(|s| s.with_chain_id(Some(POLYGON)));
 
         Self {
             config,
@@ -495,230 +417,6 @@ impl PolymarketClient {
             passphrase: key_resp.passphrase,
             address: address_str,
         })
-    }
-
-    #[allow(dead_code)]
-    /// POST /order avec backoff exponentiel sur les erreurs retryables (425, 429, 500, 503).
-    async fn post_order_with_retry(
-        &self,
-        creds: &ApiCreds,
-        body: String,
-    ) -> Result<PostOrderResponse> {
-        let http = self.http.clone();
-        let creds = creds.clone();
-
-        let policy = ExponentialBackoffBuilder::new()
-            .with_initial_interval(Duration::from_millis(500))
-            .with_multiplier(2.0)
-            .with_max_interval(Duration::from_secs(30))
-            .with_max_elapsed_time(Some(Duration::from_secs(120)))
-            .build();
-
-        retry(policy, || {
-            let http = http.clone();
-            let creds = creds.clone();
-            let body = body.clone();
-            async move {
-                let timestamp = Utc::now().timestamp().to_string();
-                let sig =
-                    Self::compute_hmac_sig(&creds.secret, &timestamp, "POST", "/order", &body)
-                        .map_err(backoff::Error::permanent)?;
-
-                let resp = http
-                    .post(format!("{}/order", CLOB_API_BASE))
-                    .header("Content-Type", "application/json")
-                    .header("POLY_ADDRESS", &creds.address)
-                    .header("POLY_API_KEY", &creds.api_key)
-                    .header("POLY_PASSPHRASE", &creds.passphrase)
-                    .header("POLY_SIGNATURE", &sig)
-                    .header("POLY_TIMESTAMP", &timestamp)
-                    .body(body)
-                    .send()
-                    .await
-                    .map_err(|e| backoff::Error::transient(anyhow!(e)))?;
-
-                let status = resp.status().as_u16();
-                if matches!(status, 425 | 429 | 500 | 503) {
-                    warn!("Polymarket HTTP {} — retry dans quelques secondes", status);
-                    return Err(backoff::Error::transient(anyhow!("HTTP {}", status)));
-                }
-
-                let body_txt = resp.text().await
-                    .map_err(|e| backoff::Error::permanent(anyhow!(e)))?;
-                warn!("CLOB response body: {}", body_txt);
-                serde_json::from_str::<PostOrderResponse>(&body_txt)
-                    .map_err(|e| backoff::Error::permanent(anyhow!(e)))
-            }
-        })
-        .await
-    }
-
-    #[allow(dead_code)]
-    async fn get_tick_size(&self, token_id: &str) -> Result<f64> {
-        let resp = self
-            .http
-            .get(format!("{}/tick-size?token_id={}", CLOB_API_BASE, token_id))
-            .send()
-            .await
-            .map_err(|e| anyhow!("GET /tick-size: {}", e))?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!("GET /tick-size -> HTTP {}", resp.status()));
-        }
-
-        let body: TickSizeResponse = resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("parse tick-size response: {}", e))?;
-        Ok(body.minimum_tick_size)
-    }
-
-    #[allow(dead_code)]
-    async fn get_fee_rate_bps(&self, token_id: &str) -> Result<u64> {
-        let resp = self
-            .http
-            .get(format!("{}/fee-rate?token_id={}", CLOB_API_BASE, token_id))
-            .send()
-            .await
-            .map_err(|e| anyhow!("GET /fee-rate: {}", e))?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!("GET /fee-rate -> HTTP {}", resp.status()));
-        }
-
-        let body: FeeRateResponse = resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("parse fee-rate response: {}", e))?;
-        Ok(body.base_fee)
-    }
-
-    #[allow(dead_code)]
-    async fn calculate_market_price(
-        &self,
-        token_id: &str,
-        side: &str,
-        amount: f64,
-        order_type: &str,
-    ) -> Result<f64> {
-        let resp = self
-            .http
-            .get(format!("{}/book?token_id={}", CLOB_API_BASE, token_id))
-            .send()
-            .await
-            .map_err(|e| anyhow!("GET /book: {}", e))?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!("GET /book -> HTTP {}", resp.status()));
-        }
-
-        let book: OrderBookResponse = resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("parse order book response: {}", e))?;
-
-        let levels = if side == "BUY" { &book.asks } else { &book.bids };
-        if levels.is_empty() {
-            return Err(anyhow!("order book vide pour {}", token_id));
-        }
-
-        let mut total = 0.0;
-        for level in levels.iter().rev() {
-            let price = level
-                .price
-                .parse::<f64>()
-                .map_err(|e| anyhow!("parse ask price '{}': {}", level.price, e))?;
-            let size = level
-                .size
-                .parse::<f64>()
-                .map_err(|e| anyhow!("parse ask size '{}': {}", level.size, e))?;
-            total += if side == "BUY" { price * size } else { size };
-            if total >= amount {
-                return Ok(price);
-            }
-        }
-
-        if order_type == "FOK" {
-            return Err(anyhow!("pas assez de liquidité pour matcher {}", amount));
-        }
-
-        levels[0]
-            .price
-            .parse::<f64>()
-            .map_err(|e| anyhow!("parse fallback market price: {}", e))
-    }
-
-    #[allow(dead_code)]
-    fn market_buy_amounts(amount_usdc: f64, price: f64, tick_size: f64) -> Result<(u64, u64, f64)> {
-        if amount_usdc < 1.0 {
-            return Err(anyhow!("Mode Market requiert un montant >= 1 USDC"));
-        }
-
-        let round_config = Self::round_config(tick_size)?;
-        let raw_price = Self::round_normal(price, round_config.0);
-        let raw_maker_amt = Self::round_down(amount_usdc, round_config.1);
-        let mut raw_taker_amt = raw_maker_amt / raw_price;
-        if Self::decimal_places(raw_taker_amt) > round_config.2 {
-            raw_taker_amt = Self::round_up(raw_taker_amt, round_config.2 + 4);
-            if Self::decimal_places(raw_taker_amt) > round_config.2 {
-                raw_taker_amt = Self::round_down(raw_taker_amt, round_config.2);
-            }
-        }
-
-        Ok((
-            Self::to_token_decimals(raw_maker_amt)?,
-            Self::to_token_decimals(raw_taker_amt)?,
-            raw_taker_amt,
-        ))
-    }
-
-    #[allow(dead_code)]
-    fn round_config(tick_size: f64) -> Result<(u32, u32, u32)> {
-        if (tick_size - 0.1).abs() < 1e-9 {
-            Ok((1, 2, 3))
-        } else if (tick_size - 0.01).abs() < 1e-9 {
-            Ok((2, 2, 4))
-        } else if (tick_size - 0.001).abs() < 1e-9 {
-            Ok((3, 2, 5))
-        } else if (tick_size - 0.0001).abs() < 1e-9 {
-            Ok((4, 2, 6))
-        } else {
-            Err(anyhow!("tick size non supporté: {}", tick_size))
-        }
-    }
-
-    #[allow(dead_code)]
-    fn round_down(x: f64, digits: u32) -> f64 {
-        let factor = 10f64.powi(digits as i32);
-        (x * factor).floor() / factor
-    }
-
-    #[allow(dead_code)]
-    fn round_normal(x: f64, digits: u32) -> f64 {
-        let factor = 10f64.powi(digits as i32);
-        (x * factor).round() / factor
-    }
-
-    #[allow(dead_code)]
-    fn round_up(x: f64, digits: u32) -> f64 {
-        let factor = 10f64.powi(digits as i32);
-        (x * factor).ceil() / factor
-    }
-
-    #[allow(dead_code)]
-    fn decimal_places(x: f64) -> u32 {
-        let s = format!("{}", x);
-        s.split('.').nth(1).map(|part| part.len() as u32).unwrap_or(0)
-    }
-
-    #[allow(dead_code)]
-    fn to_token_decimals(x: f64) -> Result<u64> {
-        let scaled = x * 1_000_000.0;
-        let rounded = scaled.round();
-        if !rounded.is_finite() || rounded < 0.0 {
-            return Err(anyhow!("montant invalide: {}", x));
-        }
-        Ok(rounded as u64)
     }
 
     // ── EIP-712 ───────────────────────────────────────────────────────────────

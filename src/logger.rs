@@ -5,6 +5,7 @@ use csv::WriterBuilder;
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tracing::info;
 
 #[derive(Debug, Serialize)]
@@ -28,6 +29,8 @@ pub struct TradeRecord {
 
 pub struct TradeLogger {
     csv_path: PathBuf,
+    /// Protège les accès concurrents au fichier CSV (read-modify-write).
+    lock: Mutex<()>,
 }
 
 impl TradeLogger {
@@ -71,10 +74,14 @@ impl TradeLogger {
 
         Self::migrate_csv_if_needed(&csv_path)?;
 
-        Ok(Self { csv_path })
+        Ok(Self {
+            csv_path,
+            lock: Mutex::new(()),
+        })
     }
 
     pub fn has_signal_key(&self, signal_key: &str) -> Result<bool> {
+        let _guard = self.lock.lock().map_err(|e| anyhow!("CSV lock poisoned: {}", e))?;
         if !self.csv_path.exists() {
             return Ok(false);
         }
@@ -111,6 +118,7 @@ impl TradeLogger {
     }
 
     fn update_trade_field(&self, trade_id: &str, column_name: &str, new_value: &str) -> Result<()> {
+        let _guard = self.lock.lock().map_err(|e| anyhow!("CSV lock poisoned: {}", e))?;
         let content = fs::read_to_string(&self.csv_path)?;
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(true)
@@ -260,6 +268,7 @@ impl TradeLogger {
     }
 
     pub fn log_trade(&self, record: &TradeRecord) -> Result<()> {
+        let _guard = self.lock.lock().map_err(|e| anyhow!("CSV lock poisoned: {}", e))?;
         let file = OpenOptions::new().append(true).open(&self.csv_path)?;
         let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
         wtr.serialize(record)?;

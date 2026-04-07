@@ -50,6 +50,8 @@ pub struct Config {
     pub polymarket_slug_prefix: String,
     /// Multiplicateur Martingale après chaque loss. 1.0 = désactivé. Défaut: 1.0
     pub martingale_multiplier: f64,
+    /// Montant maximum Martingale en USDC. 0.0 = pas de plafond. Défaut: 0.0
+    pub martingale_max_amount: f64,
 }
 
 impl std::fmt::Debug for Config {
@@ -72,6 +74,7 @@ impl std::fmt::Debug for Config {
             .field("rsi_oversold", &self.rsi_oversold)
             .field("polymarket_slug_prefix", &self.polymarket_slug_prefix)
             .field("martingale_multiplier", &self.martingale_multiplier)
+            .field("martingale_max_amount", &self.martingale_max_amount)
             .finish()
     }
 }
@@ -141,6 +144,11 @@ impl Config {
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(1.0);
 
+        let martingale_max_amount = env::var("MARTINGALE_MAX_AMOUNT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+
         let rsi_overbought = env::var("RSI_OVERBOUGHT")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
@@ -172,6 +180,7 @@ impl Config {
             polymarket_slug_prefix: env::var("POLYMARKET_SLUG_PREFIX")
                 .unwrap_or_else(|_| "btc-updown-5m".to_string()),
             martingale_multiplier,
+            martingale_max_amount,
         })
     }
 }

@@ -22,6 +22,7 @@ fn make_config(mode: ExecutionMode) -> Config {
         rsi_oversold: 35.0,
         polymarket_slug_prefix: "btc-updown-5m".to_string(),
         martingale_multiplier: 1.0,
+        martingale_max_amount: 0.0,
     }
 }
 

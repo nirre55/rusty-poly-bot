@@ -36,6 +36,7 @@ fn make_config(logs_dir: &str) -> Config {
         rsi_oversold: 35.0,
         polymarket_slug_prefix: "btc-updown-5m".to_string(),
         martingale_multiplier: 1.0,
+        martingale_max_amount: 0.0,
     }
 }
 
@@ -53,7 +54,7 @@ fn make_candle(close_time: chrono::DateTime<Utc>, open: f64, close: f64) -> Cand
 }
 
 fn make_money(dir: &std::path::Path) -> Arc<tokio::sync::Mutex<MoneyManager>> {
-    Arc::new(tokio::sync::Mutex::new(MoneyManager::new(1.0, 1.0, dir.to_str().unwrap())))
+    Arc::new(tokio::sync::Mutex::new(MoneyManager::new(1.0, 1.0, 0.0, dir.to_str().unwrap())))
 }
 
 fn make_record(trade_id: &str, signal_key: &str, prediction: &str) -> TradeRecord {

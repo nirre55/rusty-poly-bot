@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use tracing::debug;
 
 use crate::binance::Candle;
@@ -36,7 +37,7 @@ fn rsi_from_avgs(avg_gain: f64, avg_loss: f64) -> f64 {
 ///   avg_gain = (avg_gain * (period-1) + gain) / period
 pub struct ThreeCandleRsi7Reversal {
     /// Dernières STREAK bougies pour la détection de série.
-    recent: Vec<Candle>,
+    recent: VecDeque<Candle>,
     /// Dernier close vu (nécessaire pour calculer le delta RSI et le True Range).
     last_close: Option<f64>,
     /// Moyennes lissées Wilder (None avant la fin du seed).
@@ -48,7 +49,7 @@ pub struct ThreeCandleRsi7Reversal {
     /// RSI courant (None tant que RSI_PERIOD deltas n'ont pas été vus).
     rsi: Option<f64>,
     /// Fenêtre glissante des ATR_PERIOD derniers True Ranges.
-    true_ranges: Vec<f64>,
+    true_ranges: VecDeque<f64>,
     /// ATR14 courant (None tant que ATR_PERIOD True Ranges n'ont pas été accumulés).
     atr: Option<f64>,
     /// Seuil RSI suracheté (signal DOWN si RSI >= ce seuil).
@@ -60,14 +61,14 @@ pub struct ThreeCandleRsi7Reversal {
 impl ThreeCandleRsi7Reversal {
     pub fn new(rsi_overbought: f64, rsi_oversold: f64) -> Self {
         Self {
-            recent: Vec::with_capacity(STREAK + 1),
+            recent: VecDeque::with_capacity(STREAK + 1),
             last_close: None,
             avg_gain: None,
             avg_loss: None,
             seed_gains: Vec::with_capacity(RSI_PERIOD),
             seed_losses: Vec::with_capacity(RSI_PERIOD),
             rsi: None,
-            true_ranges: Vec::with_capacity(ATR_PERIOD),
+            true_ranges: VecDeque::with_capacity(ATR_PERIOD + 1),
             atr: None,
             rsi_overbought,
             rsi_oversold,
@@ -107,18 +108,18 @@ impl ThreeCandleRsi7Reversal {
                 .max((candle.high - last).abs())
                 .max((candle.low - last).abs());
             if self.true_ranges.len() == ATR_PERIOD {
-                self.true_ranges.remove(0);
+                self.true_ranges.pop_front();
             }
-            self.true_ranges.push(tr);
+            self.true_ranges.push_back(tr);
             if self.true_ranges.len() == ATR_PERIOD {
                 self.atr = Some(self.true_ranges.iter().sum::<f64>() / ATR_PERIOD as f64);
             }
         }
         self.last_close = Some(candle.close);
 
-        self.recent.push(candle.clone());
+        self.recent.push_back(candle.clone());
         if self.recent.len() > STREAK {
-            self.recent.remove(0);
+            self.recent.pop_front();
         }
     }
 
@@ -190,7 +191,7 @@ impl Strategy for ThreeCandleRsi7Reversal {
 
         let rsi = self.rsi?;
         let is_green_series = self.last_three_same_color()?;
-        let last = self.recent.last()?;
+        let last = self.recent.back()?;
 
         // Filtres Range et Body Ratio (silencieux si ATR pas encore prêt)
         if !self.range_ok(last).unwrap_or(false) {

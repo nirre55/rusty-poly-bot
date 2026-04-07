@@ -123,6 +123,7 @@ impl PositionTracker {
     pub async fn validate_with_closed_candle(&self, candle_close_time: DateTime<Utc>, candle_is_green: bool) {
         let mut pending = self.pending.lock().await;
         let mut changed = false;
+        let len_before = pending.len();
 
         for trade in pending.iter_mut() {
             if trade.validation_done {
@@ -158,7 +159,7 @@ impl PositionTracker {
         }
 
         pending.retain(|trade| !Self::can_drop_trade(trade));
-        if changed {
+        if changed || pending.len() < len_before {
             if let Err(e) = self.save_pending(&pending) {
                 warn!("[TRACKER] Sauvegarde état tracker échouée: {}", e);
             }
@@ -183,10 +184,11 @@ impl PositionTracker {
     }
 
     async fn poll_once(&self) -> anyhow::Result<()> {
-        let mut pending = self.pending.lock().await;
+        // Cloner la liste et relâcher le lock AVANT les appels réseau
+        let trades: Vec<PendingTrade> = self.pending.lock().await.clone();
         let mut still_pending = Vec::new();
 
-        for mut trade in pending.drain(..) {
+        for mut trade in trades {
             match self.client.get_order_status(&trade.order_id).await {
                 Ok(status) => {
                     let status_changed = trade
@@ -233,6 +235,8 @@ impl PositionTracker {
         }
 
         still_pending.retain(|trade| !Self::can_drop_trade(trade));
+        // Reprendre le lock pour mettre à jour l'état
+        let mut pending = self.pending.lock().await;
         *pending = still_pending;
         if let Err(e) = self.save_pending(&pending) {
             warn!("[TRACKER] Sauvegarde état tracker échouée: {}", e);
