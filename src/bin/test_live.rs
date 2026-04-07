@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
         config.execution_mode = ExecutionMode::Market;
     }
     config.trade_amount_usdc = 1.0; // minimum = 1$ sur Polymarket
+    let trade_amount = config.trade_amount_usdc;
 
     let client = PolymarketClient::new(config);
 
@@ -88,7 +89,7 @@ async fn main() -> Result<()> {
     };
 
     println!("[3/4] Placement ordre UP (1 USDC)...");
-    let order = match client.place_order(&signal, &market).await {
+    let order = match client.place_order(&signal, &market, trade_amount).await {
         Ok(o) => {
             println!("      ✓ order_id={}", o.order_id);
             println!("      ✓ status={}", o.status);

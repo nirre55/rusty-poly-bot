@@ -10,6 +10,7 @@ use rusty_poly_bot::config::Config;
 use rusty_poly_bot::logger::{
     log_candle_close, log_order_ack, log_order_sent, log_signal_detected, TradeLogger, TradeRecord,
 };
+use rusty_poly_bot::money::MoneyManager;
 use rusty_poly_bot::polymarket::PolymarketClient;
 use rusty_poly_bot::strategies::three_candle_rsi7_reversal::ThreeCandleRsi7Reversal;
 use rusty_poly_bot::strategy::{Prediction, Strategy};
@@ -82,10 +83,26 @@ async fn main() -> Result<()> {
     poly_client.warm_up().await;
     let mut active_strategy = create_strategy(&config)?;
 
+    // Money manager : Martingale progressive
+    let money_manager = Arc::new(tokio::sync::Mutex::new(MoneyManager::new(
+        config.trade_amount_usdc,
+        config.martingale_multiplier,
+        &config.logs_dir,
+    )));
+    if config.martingale_multiplier > 1.0 {
+        let mm = money_manager.lock().await;
+        info!(
+            "Martingale activée | base={:.2} USDC multiplier={:.2} montant_courant={:.2} USDC (losses={})",
+            config.trade_amount_usdc, config.martingale_multiplier,
+            mm.current_amount(), mm.consecutive_losses()
+        );
+    }
+
     // Tracker V3 : suit les ordres ouverts et met à jour outcome dans le CSV
     let tracker = Arc::new(PositionTracker::new(
         poly_client.clone(),
         trade_logger.clone(),
+        money_manager.clone(),
         &config.logs_dir,
     ));
     tokio::spawn({
@@ -215,9 +232,10 @@ async fn main() -> Result<()> {
             }
         };
 
+        let trade_amount = money_manager.lock().await.current_amount();
         let order_submit_started_at = Utc::now();
 
-        let order_result = match poly_client.place_order(&signal, &market).await {
+        let order_result = match poly_client.place_order(&signal, &market, trade_amount).await {
             Ok(r) => r,
             Err(e) => {
                 error!("Erreur lors de l'envoi de l'ordre: {}", e);
@@ -263,7 +281,7 @@ async fn main() -> Result<()> {
             Prediction::Down => &market.down_token_id,
         };
 
-        log_order_sent(&order_result.order_id, token_id, config.trade_amount_usdc);
+        log_order_sent(&order_result.order_id, token_id, trade_amount);
         log_order_ack(&order_result.order_id, &order_result.status, signal_to_ack_ms);
 
         let trade_id = Uuid::new_v4().to_string();

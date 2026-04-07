@@ -21,6 +21,7 @@ fn make_config(mode: ExecutionMode) -> Config {
         rsi_overbought: 65.0,
         rsi_oversold: 35.0,
         polymarket_slug_prefix: "btc-updown-5m".to_string(),
+        martingale_multiplier: 1.0,
     }
 }
 
@@ -90,7 +91,7 @@ async fn test_place_order_dryrun_returns_ok() {
     let signal = make_signal(Prediction::Up);
     let market = make_market();
 
-    let result = client.place_order(&signal, &market).await;
+    let result = client.place_order(&signal, &market, 10.0).await;
     assert!(result.is_ok(), "DryRun doit retourner Ok");
 
     let order = result.unwrap();
@@ -104,7 +105,7 @@ async fn test_place_order_dryrun_down_signal() {
     let signal = make_signal(Prediction::Down);
     let market = make_market();
 
-    let result = client.place_order(&signal, &market).await;
+    let result = client.place_order(&signal, &market, 10.0).await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap().status, "DRY_RUN");
 }
@@ -116,7 +117,7 @@ async fn test_place_order_market_mode_returns_err() {
     let signal = make_signal(Prediction::Up);
     let market = make_market();
 
-    let result = client.place_order(&signal, &market).await;
+    let result = client.place_order(&signal, &market, 10.0).await;
     assert!(result.is_err(), "Mode Market non implémenté doit retourner Err");
 }
 
@@ -127,7 +128,7 @@ async fn test_place_order_limit_mode_returns_err() {
     let signal = make_signal(Prediction::Down);
     let market = make_market();
 
-    let result = client.place_order(&signal, &market).await;
+    let result = client.place_order(&signal, &market, 10.0).await;
     assert!(result.is_err(), "Mode Limit non implémenté doit retourner Err");
 }
 
@@ -139,7 +140,7 @@ async fn test_place_order_dryrun_timestamps_ordered() {
     let market = make_market();
 
     let before = Utc::now();
-    let order = client.place_order(&signal, &market).await.unwrap();
+    let order = client.place_order(&signal, &market, 10.0).await.unwrap();
     assert!(order.ack_at >= before, "ack_at doit être >= au timestamp avant l'appel");
     assert!(order.ack_at >= order.submitted_at, "ack_at doit être >= submitted_at");
 }

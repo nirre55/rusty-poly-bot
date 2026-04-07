@@ -48,6 +48,8 @@ pub struct Config {
     pub rsi_oversold: f64,
     /// Préfixe slug Polymarket (ex: "btc-updown-5m"). Format final: {prefix}-{timestamp}
     pub polymarket_slug_prefix: String,
+    /// Multiplicateur Martingale après chaque loss. 1.0 = désactivé. Défaut: 1.0
+    pub martingale_multiplier: f64,
 }
 
 impl std::fmt::Debug for Config {
@@ -69,6 +71,7 @@ impl std::fmt::Debug for Config {
             .field("rsi_overbought", &self.rsi_overbought)
             .field("rsi_oversold", &self.rsi_oversold)
             .field("polymarket_slug_prefix", &self.polymarket_slug_prefix)
+            .field("martingale_multiplier", &self.martingale_multiplier)
             .finish()
     }
 }
@@ -133,6 +136,11 @@ impl Config {
             Err(_) => None,
         };
 
+        let martingale_multiplier = env::var("MARTINGALE_MULTIPLIER")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(1.0);
+
         let rsi_overbought = env::var("RSI_OVERBOUGHT")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
@@ -163,6 +171,7 @@ impl Config {
             rsi_oversold,
             polymarket_slug_prefix: env::var("POLYMARKET_SLUG_PREFIX")
                 .unwrap_or_else(|_| "btc-updown-5m".to_string()),
+            martingale_multiplier,
         })
     }
 }

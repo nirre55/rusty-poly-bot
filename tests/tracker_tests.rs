@@ -4,6 +4,7 @@ use rusty_poly_bot::config::{Config, ExecutionMode};
 use rusty_poly_bot::logger::{TradeLogger, TradeRecord};
 use rusty_poly_bot::polymarket::PolymarketClient;
 use rusty_poly_bot::strategy::Prediction;
+use rusty_poly_bot::money::MoneyManager;
 use rusty_poly_bot::tracker::{build_signal_key, PositionTracker};
 use std::fs;
 use std::sync::Arc;
@@ -34,6 +35,7 @@ fn make_config(logs_dir: &str) -> Config {
         rsi_overbought: 65.0,
         rsi_oversold: 35.0,
         polymarket_slug_prefix: "btc-updown-5m".to_string(),
+        martingale_multiplier: 1.0,
     }
 }
 
@@ -48,6 +50,10 @@ fn make_candle(close_time: chrono::DateTime<Utc>, open: f64, close: f64) -> Cand
         volume: 1.0,
         is_closed: true,
     }
+}
+
+fn make_money(dir: &std::path::Path) -> Arc<tokio::sync::Mutex<MoneyManager>> {
+    Arc::new(tokio::sync::Mutex::new(MoneyManager::new(1.0, 1.0, dir.to_str().unwrap())))
 }
 
 fn make_record(trade_id: &str, signal_key: &str, prediction: &str) -> TradeRecord {
@@ -83,7 +89,8 @@ async fn test_tracker_persists_pending_orders() {
     let logger = Arc::new(TradeLogger::new(dir.to_str().unwrap()).unwrap());
     let client = Arc::new(PolymarketClient::new(make_config(dir.to_str().unwrap())));
 
-    let tracker = PositionTracker::new(client.clone(), logger.clone(), dir.to_str().unwrap());
+    let money = make_money(&dir);
+    let tracker = PositionTracker::new(client.clone(), logger.clone(), money.clone(), dir.to_str().unwrap());
     tracker
         .track(
             "trade-1".to_string(),
@@ -95,7 +102,7 @@ async fn test_tracker_persists_pending_orders() {
         )
         .await;
 
-    let reloaded = PositionTracker::new(client, logger, dir.to_str().unwrap());
+    let reloaded = PositionTracker::new(client, logger, money, dir.to_str().unwrap());
     assert_eq!(reloaded.pending_count().await, 1);
     assert!(reloaded.is_signal_active("signal-1").await);
 
@@ -109,7 +116,8 @@ async fn test_tracker_ignores_duplicate_signal_key() {
     let logger = Arc::new(TradeLogger::new(dir.to_str().unwrap()).unwrap());
     let client = Arc::new(PolymarketClient::new(make_config(dir.to_str().unwrap())));
 
-    let tracker = PositionTracker::new(client, logger, dir.to_str().unwrap());
+    let money = make_money(&dir);
+    let tracker = PositionTracker::new(client, logger, money, dir.to_str().unwrap());
     tracker
         .track(
             "trade-1".to_string(),
@@ -142,7 +150,8 @@ async fn test_tracker_validates_win_with_green_candle_for_up() {
     let logger = Arc::new(TradeLogger::new(dir.to_str().unwrap()).unwrap());
     let client = Arc::new(PolymarketClient::new(make_config(dir.to_str().unwrap())));
 
-    let tracker = PositionTracker::new(client, logger.clone(), dir.to_str().unwrap());
+    let money = make_money(&dir);
+    let tracker = PositionTracker::new(client, logger.clone(), money, dir.to_str().unwrap());
     let target_close_time = Utc::now();
     logger
         .log_trade(&make_record("trade-1", "signal-1", "UP"))

@@ -348,7 +348,7 @@ impl PolymarketClient {
     /// - `DryRun` : simule sans appel réseau (aucune clé requise).
     /// - `Market` : ordre FAK signé EIP-712 + headers HMAC-SHA256 L2.
     /// - `Limit`  : non implémenté.
-    pub async fn place_order(&self, signal: &Signal, market: &MarketInfo) -> Result<OrderResult> {
+    pub async fn place_order(&self, signal: &Signal, market: &MarketInfo, amount_usdc: f64) -> Result<OrderResult> {
         let token_id_str = match &signal.prediction {
             Prediction::Up => &market.up_token_id,
             Prediction::Down => &market.down_token_id,
@@ -359,8 +359,8 @@ impl PolymarketClient {
         match self.config.execution_mode {
             ExecutionMode::DryRun => {
                 info!(
-                    "[DRY-RUN] Ordre simulé | type=FAK token={} amount={} USDC",
-                    token_id_str, self.config.trade_amount_usdc
+                    "[DRY-RUN] Ordre simulé | type=FAK token={} amount={:.2} USDC",
+                    token_id_str, amount_usdc
                 );
                 Ok(OrderResult {
                     order_id: format!("dry-run-{}", Uuid::new_v4()),
@@ -371,7 +371,7 @@ impl PolymarketClient {
             }
 
             ExecutionMode::Market => {
-                self.submit_market_order_with_retry(token_id_str, submitted_at)
+                self.submit_market_order_with_retry(token_id_str, submitted_at, amount_usdc)
                     .await
             }
 
@@ -931,6 +931,7 @@ impl PolymarketClient {
         &self,
         token_id_str: &str,
         submitted_at: DateTime<Utc>,
+        amount_usdc: f64,
     ) -> Result<OrderResult> {
         use std::time::Instant;
 
@@ -943,7 +944,7 @@ impl PolymarketClient {
         let client = self.get_or_create_sdk_client().await?;
         let sdk_client_ms = t0.elapsed().as_millis();
 
-        let amount = Decimal::from_str(&format!("{:.6}", self.config.trade_amount_usdc))
+        let amount = Decimal::from_str(&format!("{:.6}", amount_usdc))
             .map_err(|e| anyhow!("montant Decimal invalide: {}", e))?;
 
         // Prix plafond 0.99 : le CLOB matche au meilleur ask disponible.
@@ -980,8 +981,8 @@ impl PolymarketClient {
         let ack_at = Utc::now();
 
         info!(
-            "Ordre FOK envoyé via SDK | token={} amount={}USDC | timing: sdk_client={}ms build={}ms sign={}ms post={}ms total={}ms",
-            token_id_str, self.config.trade_amount_usdc,
+            "Ordre FOK envoyé via SDK | token={} amount={:.2}USDC | timing: sdk_client={}ms build={}ms sign={}ms post={}ms total={}ms",
+            token_id_str, amount_usdc,
             sdk_client_ms, build_ms, sign_ms, post_ms, t0.elapsed().as_millis()
         );
 
@@ -997,11 +998,12 @@ impl PolymarketClient {
         &self,
         token_id_str: &str,
         submitted_at: DateTime<Utc>,
+        amount_usdc: f64,
     ) -> Result<OrderResult> {
         let mut attempt = 0usize;
 
         loop {
-            match self.submit_market_order(token_id_str, submitted_at).await {
+            match self.submit_market_order(token_id_str, submitted_at, amount_usdc).await {
                 Ok(result) => return Ok(result),
                 Err(e) if Self::is_fok_unfilled_error(&e) && attempt < FOK_RETRY_DELAYS_SECS.len() => {
                     let delay_secs = FOK_RETRY_DELAYS_SECS[attempt];

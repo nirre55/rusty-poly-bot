@@ -9,6 +9,7 @@ use tokio::time::{interval as tick_interval, Duration};
 use tracing::{info, warn};
 
 use crate::logger::TradeLogger;
+use crate::money::MoneyManager;
 use crate::polymarket::PolymarketClient;
 use crate::strategy::Prediction;
 
@@ -44,11 +45,12 @@ pub struct PositionTracker {
     pending: Mutex<Vec<PendingTrade>>,
     client: Arc<PolymarketClient>,
     logger: Arc<TradeLogger>,
+    money: Arc<tokio::sync::Mutex<MoneyManager>>,
     state_path: PathBuf,
 }
 
 impl PositionTracker {
-    pub fn new(client: Arc<PolymarketClient>, logger: Arc<TradeLogger>, logs_dir: &str) -> Self {
+    pub fn new(client: Arc<PolymarketClient>, logger: Arc<TradeLogger>, money: Arc<tokio::sync::Mutex<MoneyManager>>, logs_dir: &str) -> Self {
         let state_path = PathBuf::from(logs_dir).join("pending_orders.json");
         let pending = Self::load_pending(&state_path);
         if !pending.is_empty() {
@@ -62,6 +64,7 @@ impl PositionTracker {
             pending: Mutex::new(pending),
             client,
             logger,
+            money,
             state_path,
         }
     }
@@ -147,6 +150,7 @@ impl PositionTracker {
                         "[TRACKER] Validation Binance | trade_id={} outcome={}",
                         trade.trade_id, outcome
                     );
+                    self.money.lock().await.on_outcome(&outcome);
                     trade.validation_done = true;
                     changed = true;
                 }
