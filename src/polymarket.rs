@@ -642,7 +642,9 @@ impl PolymarketClient {
         let client = self.get_or_create_sdk_client().await?;
         let sdk_client_ms = t0.elapsed().as_millis();
 
-        let amount = Decimal::from_str(&format!("{:.6}", amount_usdc))
+        // Polymarket exige max 2 décimales pour le maker amount (USDC)
+        let truncated_usdc = (amount_usdc * 100.0).floor() / 100.0;
+        let amount = Decimal::from_str(&format!("{:.2}", truncated_usdc))
             .map_err(|e| anyhow!("montant Decimal invalide: {}", e))?;
 
         // Prix plafond 0.99 : le CLOB matche au meilleur ask disponible.
