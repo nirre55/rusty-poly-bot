@@ -22,10 +22,14 @@ src/
 ├── strategies/
 │   ├── mod.rs
 │   └── three_candle_rsi7_reversal.rs
-├── polymarket.rs                    # Client Polymarket (stub V2)
+├── polymarket.rs                    # Client Polymarket CLOB + EIP-712
+├── tracker.rs                       # Suivi des ordres ouverts + validation Binance
+├── money.rs                         # Gestion Martingale (taille de position dynamique)
 └── logger.rs                        # Logs console + CSV trades
 logs/
-    trades.csv                       # Généré automatiquement
+├── trades.csv                       # Historique des trades
+├── pending_orders.json              # Ordres en cours de suivi
+└── money_state.json                 # État Martingale (losses consécutifs)
 ```
 
 ## Installation
@@ -51,7 +55,26 @@ cp .env.example .env
 # Editer .env selon vos besoins
 ```
 
-## Lancer en dry-run (V1 — aucune clé requise)
+## Variables d'environnement
+
+| Variable | Description | Défaut |
+|---|---|---|
+| `EXECUTION_MODE` | `dry-run`, `market` ou `limit` | `dry-run` |
+| `SYMBOL` | Paire Binance (ex: `btcusdt`, `ethusdt`) | `btcusdt` |
+| `INTERVAL` | Intervalle des bougies (ex: `5m`, `15m`, `1h`) | `5m` |
+| `TRADE_AMOUNT_USDC` | Montant de base par trade en USDC | `10.0` |
+| `STRATEGY` | Nom de la stratégie | `three_candle_rsi7_reversal` |
+| `RSI_OVERBOUGHT` | Seuil RSI haut (signal DOWN) | `65.0` |
+| `RSI_OVERSOLD` | Seuil RSI bas (signal UP) | `35.0` |
+| `POLYMARKET_SLUG_PREFIX` | Préfixe slug marché (ex: `btc-updown-5m`) | `btc-updown-5m` |
+| `MARTINGALE_MULTIPLIER` | Multiplicateur après chaque loss (`1.0` = désactivé) | `1.0` |
+| `MARTINGALE_MAX_AMOUNT` | Plafond Martingale en USDC (`0.0` = pas de plafond) | `0.0` |
+| `POLYMARKET_PRIVATE_KEY` | Clé privée EVM (hex). Requis pour mode `market` | — |
+| `POLYMARKET_FUNDER` | Adresse funder si différente de l'EOA | — |
+| `POLYMARKET_SIGNATURE_TYPE` | `0`=EOA, `1`=POLY_PROXY, `2`=GNOSIS_SAFE | — |
+| `LOGS_DIR` | Répertoire des logs | `logs` |
+
+## Lancer en dry-run
 
 ```bash
 EXECUTION_MODE=dry-run cargo run
@@ -59,15 +82,56 @@ EXECUTION_MODE=dry-run cargo run
 
 Le bot se connecte au WebSocket Binance, calcule les signaux en temps réel et simule les ordres sans aucun appel réseau Polymarket.
 
-## Lancer en mode réel (V2 — ordres Polymarket)
-
-> **Note** : Le mode `market` et `limit` sont des stubs en V1.
-> L'implémentation V2 nécessite une clé privée EVM et la signature EIP-712.
+## Lancer en mode réel
 
 ```bash
-# Remplir POLYMARKET_API_KEY et POLYMARKET_API_SECRET dans .env
+# Remplir POLYMARKET_PRIVATE_KEY dans .env
 EXECUTION_MODE=market cargo run
 ```
+
+## Gestion Martingale
+
+Taille de position dynamique : après chaque loss, le montant est multiplié par `MARTINGALE_MULTIPLIER`. Après un win, retour au montant de base.
+
+Exemple avec `TRADE_AMOUNT_USDC=1` et `MARTINGALE_MULTIPLIER=1.3` :
+
+| Trade | Résultat | Montant suivant |
+|---|---|---|
+| 1 | — | 1.00$ |
+| 2 | LOSS | 1.30$ |
+| 3 | LOSS | 1.69$ |
+| 4 | LOSS | 2.20$ |
+| 5 | WIN | 1.00$ (reset) |
+
+L'état persiste dans `logs/money_state.json` — un restart ne reset pas la séquence.
+
+Pour plafonner : `MARTINGALE_MAX_AMOUNT=10` limite le montant à 10 USDC max.
+
+## Plusieurs instances (multi-actifs)
+
+Lancer plusieurs instances en parallèle avec des `LOGS_DIR` séparés :
+
+**PowerShell :**
+
+```powershell
+# Terminal 1 — BTC
+$env:SYMBOL="btcusdt"; $env:POLYMARKET_SLUG_PREFIX="btc-updown-5m"; $env:LOGS_DIR="logs/btc"; cargo run
+
+# Terminal 2 — ETH
+$env:SYMBOL="ethusdt"; $env:POLYMARKET_SLUG_PREFIX="eth-updown-5m"; $env:LOGS_DIR="logs/eth"; cargo run
+```
+
+**Bash :**
+
+```bash
+# Terminal 1 — BTC
+SYMBOL=btcusdt POLYMARKET_SLUG_PREFIX=btc-updown-5m LOGS_DIR=logs/btc cargo run
+
+# Terminal 2 — ETH
+SYMBOL=ethusdt POLYMARKET_SLUG_PREFIX=eth-updown-5m LOGS_DIR=logs/eth cargo run
+```
+
+Chaque instance a son propre tracker, money manager et logs.
 
 ## Lancer les tests unitaires
 
@@ -133,11 +197,13 @@ impl Strategy for MaStrategie {
 ```
 
 2. L'enregistrer dans `src/strategies/mod.rs`
-3. L'activer dans `main.rs` : `Box::new(MaStrategie::new())`
+3. L'ajouter dans `create_strategy()` de `main.rs`
+4. Activer via : `STRATEGY=ma_strategie cargo run`
 
-## Hypothèses API Polymarket (V2)
+## API Polymarket
 
 - Résolution slug → tokenIds : `GET https://gamma-api.polymarket.com/markets?slug={slug}`
 - Placement d'ordre : `POST https://clob.polymarket.com/order` avec payload signé EIP-712
-- Le format exact du slug `btc-updown-5m-<YYYYMMDD>` doit être validé contre l'API live
-- Les tokenIds UP/DOWN varient par expiration de marché
+- Format slug : `{prefix}-{unix_seconds}` (ex: `btc-updown-5m-1710000000`)
+- Les tokenIds UP/DOWN varient par marché (chaque bougie = un marché distinct)
+- Ordres FOK (Fill or Kill) à prix plafond 0.99 pour exécution instantanée
