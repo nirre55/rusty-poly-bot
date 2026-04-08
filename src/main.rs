@@ -134,6 +134,8 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Boucle de résilience : relance le stream Binance si le channel se ferme
+    loop {
     let (tx, mut rx) = mpsc::channel::<Candle>(64);
 
     // Lancer le stream Binance dans une tâche dédiée
@@ -328,5 +330,12 @@ async fn main() -> Result<()> {
         spawn_prefetch_next_market(&poly_client, candle.close_time, interval_duration, &config.polymarket_slug_prefix);
     }
 
-    Ok(())
+    // Le channel s'est fermé (WS task morte) — relancer
+    warn!("[RECONNECT] Channel Binance fermé — relance du stream dans 5s…");
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    // Ré-authentifier le client SDK Polymarket au cas où
+    poly_client.warm_up().await;
+
+    } // fin boucle de résilience
 }

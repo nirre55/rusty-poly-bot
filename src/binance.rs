@@ -132,6 +132,7 @@ pub async fn stream_candles(
     info!("Connexion au WebSocket Binance: {}", ws_url);
 
     let mut reconnect_delay_secs = 5u64;
+    let mut last_close_time_ms: i64 = 0;
 
     loop {
         // P6 : timeout sur la tentative de connexion WebSocket
@@ -141,6 +142,20 @@ pub async fn stream_candles(
         match connect_result {
             Ok(Ok((ws_stream, _))) => {
                 info!("Connecté au WebSocket Binance");
+
+                // Rattraper les bougies manquées pendant la déconnexion
+                if last_close_time_ms > 0 {
+                    match catch_up_missed_candles(symbol, interval, last_close_time_ms, &tx).await {
+                        Ok(count) if count > 0 => {
+                            info!("[RECONNECT] {} bougies manquées rattrapées", count);
+                        }
+                        Err(e) => {
+                            warn!("[RECONNECT] Impossible de rattraper les bougies manquées: {}", e);
+                        }
+                        _ => {}
+                    }
+                }
+
                 reconnect_delay_secs = 5; // reset après connexion réussie
                 let (_, mut read) = ws_stream.split();
 
@@ -234,9 +249,18 @@ pub async fn stream_candles(
                                         is_closed: true,
                                     };
 
+                                    let candle_close_ms = candle.close_time.timestamp_millis();
+
+                                    // Ignorer les bougies déjà envoyées (ex: après rattrapage)
+                                    if candle_close_ms <= last_close_time_ms {
+                                        continue;
+                                    }
+
                                     // P5 : try_send évite de bloquer le WebSocket si le channel est plein
                                     match tx.try_send(candle) {
-                                        Ok(_) => {}
+                                        Ok(_) => {
+                                            last_close_time_ms = candle_close_ms;
+                                        }
                                         Err(mpsc::error::TrySendError::Full(_)) => {
                                             warn!("Channel saturé — bougie droppée (traitement trop lent)");
                                         }
@@ -269,11 +293,40 @@ pub async fn stream_candles(
             }
         }
 
-        info!(
-            "Reconnexion au WebSocket Binance dans {}s…",
+        warn!(
+            "[RECONNECT] Reconnexion au WebSocket Binance dans {}s…",
             reconnect_delay_secs
         );
         tokio::time::sleep(Duration::from_secs(reconnect_delay_secs)).await;
-        reconnect_delay_secs = (reconnect_delay_secs * 2).min(120);
+        reconnect_delay_secs = (reconnect_delay_secs * 2).min(60);
     }
+}
+
+/// Après reconnexion WS, récupère les bougies fermées manquées via REST
+/// et les injecte dans le channel pour que la stratégie reste à jour.
+async fn catch_up_missed_candles(
+    symbol: &str,
+    interval: &str,
+    last_close_time_ms: i64,
+    tx: &mpsc::Sender<Candle>,
+) -> Result<usize> {
+    let candles = fetch_historical_candles(symbol, interval, 30).await?;
+    let now_ms = Utc::now().timestamp_millis();
+    let mut count = 0;
+
+    for candle in candles {
+        let ct_ms = candle.close_time.timestamp_millis();
+        // Envoyer uniquement les bougies fermées qu'on n'a pas encore vues
+        if ct_ms > last_close_time_ms && ct_ms < now_ms {
+            match tx.try_send(candle) {
+                Ok(_) => count += 1,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!("[RECONNECT] Channel saturé pendant le rattrapage");
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => break,
+            }
+        }
+    }
+    Ok(count)
 }
