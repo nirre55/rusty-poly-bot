@@ -112,8 +112,11 @@ impl PolymarketClient {
     pub fn new(config: Config) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .tcp_keepalive(Some(Duration::from_secs(20)))
             .pool_max_idle_per_host(4)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .http2_keep_alive_interval(Duration::from_secs(15))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -262,6 +265,17 @@ impl PolymarketClient {
         for token_id in [&market.up_token_id, &market.down_token_id] {
             let _ = client.tick_size(token_id).await;
             let _ = client.fee_rate_bps(token_id).await;
+            let _ = client.neg_risk(token_id).await;
+        }
+    }
+
+    /// Ping keep-alive vers le CLOB pour garder la connexion TCP/TLS chaude.
+    /// À lancer dans un tokio::spawn.
+    pub async fn run_keep_alive_loop(&self) {
+        let mut ticker = tokio::time::interval(Duration::from_secs(20));
+        loop {
+            ticker.tick().await;
+            let _ = self.http.get(format!("{}/ok", CLOB_API_BASE)).send().await;
         }
     }
 
