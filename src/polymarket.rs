@@ -123,8 +123,11 @@ impl PolymarketClient {
     pub fn new(config: Config) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
-            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .tcp_keepalive(Some(Duration::from_secs(20)))
             .pool_max_idle_per_host(4)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .http2_keep_alive_interval(Duration::from_secs(15))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -157,14 +160,26 @@ impl PolymarketClient {
     /// Pré-chauffe la connexion TCP/TLS vers le CLOB (payer le handshake une seule fois).
     /// À appeler dans `main()` avant la boucle de trading.
     pub async fn warm_up(&self) {
+        use std::time::Instant;
+        let t0 = Instant::now();
         match self.http.get(format!("{}/ok", CLOB_API_BASE)).send().await {
-            Ok(_) => info!("Connexion CLOB Polymarket pré-chauffée"),
+            Ok(_) => info!("Connexion CLOB pré-chauffée ({}ms)", t0.elapsed().as_millis()),
             Err(e) => warn!("warm_up CLOB échoué (non bloquant): {}", e),
         }
         // Pré-créer le client SDK authentifié pour que le premier ordre soit aussi rapide que les suivants.
         match self.get_or_create_sdk_client().await {
             Ok(_) => info!("Client SDK Polymarket pré-authentifié"),
             Err(e) => warn!("warm_up SDK échoué (non bloquant): {}", e),
+        }
+    }
+
+    /// Ping keep-alive vers le CLOB pour garder la connexion TCP/TLS chaude.
+    /// À lancer dans un tokio::spawn.
+    pub async fn run_keep_alive_loop(&self) {
+        let mut ticker = tokio::time::interval(Duration::from_secs(20));
+        loop {
+            ticker.tick().await;
+            let _ = self.http.get(format!("{}/ok", CLOB_API_BASE)).send().await;
         }
     }
 

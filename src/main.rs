@@ -86,6 +86,13 @@ async fn main() -> Result<()> {
     let trade_logger = Arc::new(TradeLogger::new(&config.logs_dir)?);
     let poly_client = Arc::new(PolymarketClient::new(config.clone()));
     poly_client.warm_up().await;
+
+    // Keep-alive : ping CLOB toutes les 20s pour garder la connexion TCP/TLS chaude
+    tokio::spawn({
+        let poly = poly_client.clone();
+        async move { poly.run_keep_alive_loop().await }
+    });
+
     let mut active_strategy = create_strategy(&config)?;
 
     // Money manager : Martingale progressive
