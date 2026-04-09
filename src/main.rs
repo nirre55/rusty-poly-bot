@@ -43,20 +43,25 @@ fn create_strategy(config: &Config) -> Result<Box<dyn Strategy>> {
     }
 }
 
-/// Pré-fetch du marché suivant + warm caches SDK en arrière-plan.
+/// Pré-fetch du marché suivant + warm caches SDK + pré-signature ordres en arrière-plan.
 fn spawn_prefetch_next_market(
     poly_client: &Arc<PolymarketClient>,
+    money_manager: &Arc<tokio::sync::Mutex<MoneyManager>>,
     close_time: chrono::DateTime<Utc>,
     interval_duration: Duration,
     slug_prefix: &str,
 ) {
     let poly = poly_client.clone();
+    let mm = money_manager.clone();
     let future_open_ms =
         (close_time + interval_duration + chrono::Duration::milliseconds(1)).timestamp_millis();
     let future_slug = PolymarketClient::build_slug(slug_prefix, future_open_ms);
     tokio::spawn(async move {
         if let Ok(market) = poly.resolve_market(&future_slug).await {
             poly.warm_sdk_caches(&market).await;
+            // Pré-signer UP + DOWN avec le montant Martingale courant
+            let amount = mm.lock().await.current_amount();
+            poly.pre_sign_orders(&market, amount).await;
         }
     });
 }
@@ -179,7 +184,7 @@ async fn main() -> Result<()> {
             tracker
                 .validate_with_closed_candle(candle.close_time, candle.is_green())
                 .await;
-            spawn_prefetch_next_market(&poly_client, candle.close_time, interval_duration, &config.polymarket_slug_prefix);
+            spawn_prefetch_next_market(&poly_client, &money_manager, candle.close_time, interval_duration, &config.polymarket_slug_prefix);
             continue;
         };
 
@@ -327,7 +332,7 @@ async fn main() -> Result<()> {
         tracker
             .validate_with_closed_candle(candle.close_time, candle.is_green())
             .await;
-        spawn_prefetch_next_market(&poly_client, candle.close_time, interval_duration, &config.polymarket_slug_prefix);
+        spawn_prefetch_next_market(&poly_client, &money_manager, candle.close_time, interval_duration, &config.polymarket_slug_prefix);
     }
 
     // Le channel s'est fermé (WS task morte) — relancer

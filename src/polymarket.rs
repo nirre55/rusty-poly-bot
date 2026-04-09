@@ -94,6 +94,14 @@ struct ApiKeyResponse {
 
 // ── Client ────────────────────────────────────────────────────────────────────
 
+/// Ordres pré-signés (UP + DOWN) prêts à être POST directement.
+struct PreSignedOrders {
+    up_json: String,
+    down_json: String,
+    amount_usdc: f64,
+    slug: String,
+}
+
 pub struct PolymarketClient {
     config: Config,
     http: reqwest::Client,
@@ -106,6 +114,9 @@ pub struct PolymarketClient {
     sdk_client: Mutex<Option<SdkClobClient<Authenticated<Normal>>>>,
     /// Signer SDK pré-construit avec chain_id, réutilisé pour signer les ordres.
     sdk_signer: Option<PrivateKeySigner>,
+    /// Ordres pré-signés (UP + DOWN) pour le prochain signal.
+    /// Élimine build+sign du chemin critique.
+    pre_signed: Mutex<Option<PreSignedOrders>>,
 }
 
 impl PolymarketClient {
@@ -139,6 +150,7 @@ impl PolymarketClient {
             market_cache: Mutex::new(None),
             sdk_client: Mutex::new(None),
             sdk_signer,
+            pre_signed: Mutex::new(None),
         }
     }
 
@@ -262,13 +274,77 @@ impl PolymarketClient {
         for token_id in [&market.up_token_id, &market.down_token_id] {
             let _ = client.tick_size(token_id).await;
             let _ = client.fee_rate_bps(token_id).await;
+            let _ = client.neg_risk(token_id).await;
         }
+    }
+
+    /// Pré-construit et pré-signe les ordres UP et DOWN pour le prochain signal.
+    /// Appelé pendant le prefetch pour que le chemin critique ne fasse que le POST HTTP.
+    pub async fn pre_sign_orders(&self, market: &MarketInfo, amount_usdc: f64) {
+        use std::time::Instant;
+
+        let t0 = Instant::now();
+        let up_json = self.build_sign_serialize(&market.up_token_id, amount_usdc).await;
+        let down_json = self.build_sign_serialize(&market.down_token_id, amount_usdc).await;
+
+        match (up_json, down_json) {
+            (Ok(up), Ok(down)) => {
+                info!(
+                    "[PRE-SIGN] Ordres UP+DOWN pré-signés | slug={} amount={:.2} USDC | {}ms",
+                    market.slug, amount_usdc, t0.elapsed().as_millis()
+                );
+                *self.pre_signed.lock().await = Some(PreSignedOrders {
+                    up_json: up,
+                    down_json: down,
+                    amount_usdc,
+                    slug: market.slug.clone(),
+                });
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                warn!("[PRE-SIGN] Échec pré-signature: {} — fallback SDK au signal", e);
+            }
+        }
+    }
+
+    /// Construit, signe et sérialise un ordre en JSON prêt à POST.
+    async fn build_sign_serialize(&self, token_id: &str, amount_usdc: f64) -> Result<String> {
+        let sdk_signer = self
+            .sdk_signer
+            .as_ref()
+            .ok_or_else(|| anyhow!("POLYMARKET_PRIVATE_KEY requis"))?;
+
+        let client = self.get_or_create_sdk_client().await?;
+
+        let truncated = (amount_usdc * 100.0).floor() / 100.0;
+        let amount = Decimal::from_str(&format!("{:.2}", truncated))
+            .map_err(|e| anyhow!("Decimal: {}", e))?;
+        let max_price = Decimal::from_str("0.99")
+            .map_err(|e| anyhow!("Decimal: {}", e))?;
+
+        let order = client
+            .market_order()
+            .token_id(token_id)
+            .amount(Amount::usdc(amount).map_err(|e| anyhow!("Amount: {}", e))?)
+            .price(max_price)
+            .side(SdkSide::Buy)
+            .order_type(SdkOrderType::FOK)
+            .build()
+            .await
+            .map_err(|e| anyhow!("SDK build: {}", e))?;
+
+        let signed = client
+            .sign(sdk_signer, order)
+            .await
+            .map_err(|e| anyhow!("SDK sign: {}", e))?;
+
+        serde_json::to_string(&signed).map_err(|e| anyhow!("JSON serialize: {}", e))
     }
 
     /// Place un ordre sur Polymarket selon le signal reçu.
     ///
     /// - `DryRun` : simule sans appel réseau (aucune clé requise).
-    /// - `Market` : ordre FAK signé EIP-712 + headers HMAC-SHA256 L2.
+    /// - `Market` : tente d'abord le fast path (pré-signé + POST direct),
+    ///   sinon fallback sur le SDK complet.
     /// - `Limit`  : non implémenté.
     pub async fn place_order(&self, signal: &Signal, market: &MarketInfo, amount_usdc: f64) -> Result<OrderResult> {
         let token_id_str = match &signal.prediction {
@@ -293,6 +369,12 @@ impl PolymarketClient {
             }
 
             ExecutionMode::Market => {
+                // Fast path : utiliser l'ordre pré-signé si disponible
+                if let Some(result) = self.try_fast_post(signal, market, amount_usdc, submitted_at).await {
+                    return result;
+                }
+                // Fallback : SDK complet (build + sign + post)
+                info!("[SLOW-PATH] Pas d'ordre pré-signé — fallback SDK");
                 self.submit_market_order_with_retry(token_id_str, submitted_at, amount_usdc)
                     .await
             }
@@ -300,6 +382,113 @@ impl PolymarketClient {
             ExecutionMode::Limit => Err(anyhow!(
                 "Mode Limit non implémenté — devra imposer un minimum de 5 shares"
             )),
+        }
+    }
+
+    /// Tente de poster un ordre pré-signé directement via notre reqwest client.
+    /// Retourne None si pas d'ordre pré-signé disponible (montant/slug différent).
+    async fn try_fast_post(
+        &self,
+        signal: &Signal,
+        market: &MarketInfo,
+        amount_usdc: f64,
+        submitted_at: DateTime<Utc>,
+    ) -> Option<Result<OrderResult>> {
+        use std::time::Instant;
+
+        let pre_signed = self.pre_signed.lock().await.take()?;
+
+        // Vérifier que le pré-signé correspond au marché et montant courant
+        if pre_signed.slug != market.slug || (pre_signed.amount_usdc - amount_usdc).abs() > 0.001 {
+            warn!(
+                "[FAST-POST] Pré-signé invalide (slug={} amount={:.2}) vs demandé (slug={} amount={:.2})",
+                pre_signed.slug, pre_signed.amount_usdc, market.slug, amount_usdc
+            );
+            return None;
+        }
+
+        let json_body = match &signal.prediction {
+            Prediction::Up => &pre_signed.up_json,
+            Prediction::Down => &pre_signed.down_json,
+        };
+
+        let t0 = Instant::now();
+
+        // POST direct avec notre reqwest client (keep-alive, pool de connexions)
+        let signer = self.signer.as_ref()?;
+        let creds = match self.get_or_derive_creds(signer).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("[FAST-POST] Impossible de dériver les creds: {}", e);
+                return None;
+            }
+        };
+
+        let timestamp = Utc::now().timestamp().to_string();
+        let hmac_sig = match Self::compute_hmac_sig(&creds.secret, &timestamp, "POST", "/order", json_body) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("[FAST-POST] HMAC échoué: {}", e);
+                return None;
+            }
+        };
+
+        let resp = self
+            .http
+            .post(format!("{}/order", CLOB_API_BASE))
+            .header("Content-Type", "application/json")
+            .header("POLY_ADDRESS", &creds.address)
+            .header("POLY_API_KEY", &creds.api_key)
+            .header("POLY_PASSPHRASE", &creds.passphrase)
+            .header("POLY_SIGNATURE", &hmac_sig)
+            .header("POLY_TIMESTAMP", &timestamp)
+            .body(json_body.clone())
+            .send()
+            .await;
+
+        let post_ms = t0.elapsed().as_millis();
+        let ack_at = Utc::now();
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                #[derive(Deserialize)]
+                struct PostResp {
+                    #[serde(default, alias = "orderID")]
+                    order_id: String,
+                    #[serde(default)]
+                    status: String,
+                }
+
+                match r.json::<PostResp>().await {
+                    Ok(parsed) => {
+                        info!(
+                            "[FAST-POST] Ordre envoyé | token={} amount={:.2}USDC | post={}ms",
+                            match &signal.prediction { Prediction::Up => &market.up_token_id, Prediction::Down => &market.down_token_id },
+                            amount_usdc, post_ms
+                        );
+                        Some(Ok(OrderResult {
+                            order_id: parsed.order_id,
+                            status: parsed.status,
+                            submitted_at,
+                            ack_at,
+                        }))
+                    }
+                    Err(e) => {
+                        warn!("[FAST-POST] Parse réponse échoué: {} — fallback SDK", e);
+                        None
+                    }
+                }
+            }
+            Ok(r) => {
+                let status = r.status();
+                let body = r.text().await.unwrap_or_default();
+                warn!("[FAST-POST] HTTP {} — {} — fallback SDK", status, &body[..body.len().min(200)]);
+                None
+            }
+            Err(e) => {
+                warn!("[FAST-POST] Requête échouée: {} — fallback SDK", e);
+                None
+            }
         }
     }
 
